@@ -11,6 +11,7 @@ use blitz_dom::{
 };
 use blitz_html::{DocumentHtmlParser, HtmlProvider};
 use blitz_traits::events::{DomEvent, UiEvent};
+use boa_engine::context::{DefaultHooks, HostHooks};
 use url::Url;
 use web_time::Instant;
 
@@ -54,7 +55,17 @@ impl ScriptDocument {
     /// Note: this does *not* execute any scripts yet. Call
     /// [`execute_scripts`](Self::execute_scripts) to do so (or rely on the
     /// first `poll` doing it automatically).
-    pub fn from_html(html: &str, mut config: DocumentConfig) -> Self {
+    pub fn from_html(html: &str, config: DocumentConfig) -> Self {
+        Self::from_html_with_host_hooks(html, config, Rc::new(DefaultHooks))
+    }
+
+    /// Like [`from_html`](Self::from_html), but with custom Boa [`HostHooks`]
+    /// for the script context (e.g. a fixed timezone for `Date`).
+    pub fn from_html_with_host_hooks<H: HostHooks + 'static>(
+        html: &str,
+        mut config: DocumentConfig,
+        host_hooks: Rc<H>,
+    ) -> Self {
         if let Some(ss) = &mut config.ua_stylesheets {
             if !ss.iter().any(|s| s == DEFAULT_CSS) {
                 ss.push(String::from(DEFAULT_CSS));
@@ -71,7 +82,7 @@ impl ScriptDocument {
         DocumentHtmlParser::parse_into_mutator(&mut mutr, html);
         drop(mutr);
 
-        Self::from_base_document(doc)
+        Self::from_base_document_with_host_hooks(doc, host_hooks)
     }
 
     /// Wrap an already-parsed [`BaseDocument`] in a [`ScriptDocument`] without
@@ -84,6 +95,15 @@ impl ScriptDocument {
     /// an HTML parser provider (e.g. `blitz_html::HtmlProvider`) set in its
     /// [`DocumentConfig`].
     pub fn from_base_document(doc: BaseDocument) -> Self {
+        Self::from_base_document_with_host_hooks(doc, Rc::new(DefaultHooks))
+    }
+
+    /// Like [`from_base_document`](Self::from_base_document), but with custom
+    /// Boa [`HostHooks`] for the script context.
+    pub fn from_base_document_with_host_hooks<H: HostHooks + 'static>(
+        doc: BaseDocument,
+        host_hooks: Rc<H>,
+    ) -> Self {
         // The default base url (set when `DocumentConfig.base_url` is `None`) is a
         // meaningless data url. Treat it as "no base url".
         let base_url = Some(doc.base_url().clone()).filter(|url| url.scheme() != "data");
@@ -91,7 +111,12 @@ impl ScriptDocument {
         let inner = Rc::new(RefCell::new(doc));
         let fetcher: Rc<RefCell<Box<dyn ScriptFetcher>>> =
             Rc::new(RefCell::new(Box::new(DefaultScriptFetcher)));
-        let runtime = ScriptRuntime::new(Rc::clone(&inner), base_url.as_ref(), Rc::clone(&fetcher));
+        let runtime = ScriptRuntime::with_host_hooks(
+            Rc::clone(&inner),
+            base_url.as_ref(),
+            Rc::clone(&fetcher),
+            host_hooks,
+        );
 
         Self {
             inner,
