@@ -651,19 +651,19 @@ impl BaseDocument {
         #[allow(unused_mut)]
         let mut height = inline_layout.layout.height();
 
-        // HACK. TODO: fix in Parley.
-        //
-        // A forced line break (e.g. `<br>` or a preserved newline) at the end of the
-        // inline content ends the final line box but must not generate an extra empty
-        // line box after it. Parley produces a trailing empty line in this case
-        // (text-editor semantics), so we exclude that line from the measured height.
-        // if inline_layout.text.ends_with('\n') {
-        //     if let Some(last_line) = inline_layout.layout.lines().last() {
-        //         if last_line.items().next().is_none() {
-        //             height -= last_line.metrics().line_height;
-        //         }
-        //     }
-        // }
+        // A forced line break (`<br>`, or a preserved newline) at the end of the
+        // inline content ends the final line box; it does not start another one
+        // (CSS 2.1 §9.4.2, and what every browser does: `<div>x<br></div>` is one
+        // line tall, and so is `<div><br></div>`). Parley has text-editor
+        // semantics, where a trailing newline puts the caret on a new, empty
+        // line, so it produces that line. It is left in the layout -- nothing
+        // is painted on it -- and only taken out of the measured height.
+        if inline_layout.text.ends_with('\n')
+            && let Some(last_line) = inline_layout.layout.lines().last()
+            && last_line.items().next().is_none()
+        {
+            height -= last_line.metrics().line_height;
+        }
 
         #[cfg(feature = "floats")]
         {
@@ -978,6 +978,20 @@ fn layout_abspos_child(
             .maybe_clamp(min_size, max_size);
     }
 
+    // With `left`, `width` and `right` all `auto` the box sits at its static
+    // position and shrinks to fit the containing block from there (CSS 2.1
+    // §10.3.7), not the whole of it.
+    let available_width = match (left, right) {
+        (None, None) if known_dimensions.width.is_none() => {
+            if direction == Direction::Rtl && is_inline_level {
+                static_position.x - area_offset.x
+            } else {
+                area_width - (static_position.x - area_offset.x)
+            }
+        }
+        _ => area_width,
+    }
+    .max(0.0);
     let measured_size = tree
         .compute_child_layout(
             node_id,
@@ -990,7 +1004,7 @@ fn layout_abspos_child(
                 parent_size: area_size.map(Some),
                 available_space: Size {
                     width: AvailableSpace::Definite(
-                        area_width.maybe_clamp(min_size.width, max_size.width),
+                        available_width.maybe_clamp(min_size.width, max_size.width),
                     ),
                     height: AvailableSpace::Definite(
                         area_height.maybe_clamp(min_size.height, max_size.height),
