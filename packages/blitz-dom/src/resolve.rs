@@ -392,8 +392,126 @@ impl BaseDocument {
 
         taffy::compute_root_layout(self, root_element_id, available_space);
         taffy::round_layout(self, root_element_id);
+        self.place_absolute_boxes_in_their_containing_blocks();
 
         // println!("\n\n");
         // taffy::print_tree(self, root_node_id)
     }
 }
+
+/// A box's containing block for `position: absolute` is the padding box of
+/// its nearest positioned ancestor, and the initial containing block when
+/// there is none (CSS 2.1 §10.1). The layout algorithms place an absolutely
+/// positioned box against its *layout parent*, whatever that parent's
+/// `position`, so a box whose parent is not positioned lands in the wrong
+/// place: `top: 0` puts it at the top of the parent instead of the top of the
+/// page. This pass runs after layout and moves such boxes to where their
+/// insets say relative to the right containing block. Sizes are left as they
+/// were laid out; it is the placement that is corrected.
+impl BaseDocument {
+    fn place_absolute_boxes_in_their_containing_blocks(&mut self) {
+        use style::computed_values::position::T as Position;
+        use taffy::{CoreStyle as _, MaybeResolve as _};
+
+        /// A containing block: where its padding box is on the page.
+        #[derive(Clone, Copy)]
+        struct Block {
+            x: f32,
+            y: f32,
+            width: f32,
+            height: f32,
+        }
+
+        fn walk(doc: &mut BaseDocument, node_id: NodeId, parent_origin: (f32, f32), block: Block) {
+            let Some(node) = doc.nodes.get(node_id) else {
+                return;
+            };
+            let position = node
+                .primary_styles()
+                .map(|style| style.clone_position())
+                .unwrap_or(Position::Static);
+            let parent_is_block = node
+                .layout_parent
+                .get()
+                .and_then(|id| doc.nodes.get(id))
+                .and_then(|parent| parent.primary_styles().map(|s| s.clone_position()))
+                .is_none_or(|p| p != Position::Static);
+
+            if matches!(position, Position::Absolute | Position::Fixed) && !parent_is_block {
+                let layout = *node.final_layout();
+                let style = node.layout_style();
+                let inset = style.inset();
+                let calc = crate::layout::resolve_calc_value;
+                let left = inset.left.maybe_resolve(Some(block.width), calc);
+                let right = inset.right.maybe_resolve(Some(block.width), calc);
+                let top = inset.top.maybe_resolve(Some(block.height), calc);
+                let bottom = inset.bottom.maybe_resolve(Some(block.height), calc);
+                drop(style);
+                let margin = layout.margin;
+                // Where the box is now, on the page.
+                let now_x = parent_origin.0 + layout.location.x;
+                let now_y = parent_origin.1 + layout.location.y;
+                // Where its insets put it, against the containing block. With
+                // neither inset it stays at its static position.
+                let x = match (left, right) {
+                    (Some(left), _) => block.x + left + margin.left,
+                    (None, Some(right)) => {
+                        block.x + block.width - right - margin.right - layout.size.width
+                    }
+                    (None, None) => now_x,
+                };
+                let y = match (top, bottom) {
+                    (Some(top), _) => block.y + top + margin.top,
+                    (None, Some(bottom)) => {
+                        block.y + block.height - bottom - margin.bottom - layout.size.height
+                    }
+                    (None, None) => now_y,
+                };
+                let node = &mut doc.nodes[node_id];
+                let moved = node.final_layout_mut();
+                moved.location.x += x - now_x;
+                moved.location.y += y - now_y;
+                let moved = node.unrounded_layout_mut();
+                moved.location.x += x - now_x;
+                moved.location.y += y - now_y;
+            }
+
+            let node = &doc.nodes[node_id];
+            let layout = *node.final_layout();
+            let origin = (
+                parent_origin.0 + layout.location.x,
+                parent_origin.1 + layout.location.y,
+            );
+            let block = if position != Position::Static {
+                Block {
+                    x: origin.0 + layout.border.left,
+                    y: origin.1 + layout.border.top,
+                    width: layout.size.width - layout.border.left - layout.border.right,
+                    height: layout.size.height - layout.border.top - layout.border.bottom,
+                }
+            } else {
+                block
+            };
+            let children: Vec<NodeId> = node
+                .layout_children
+                .borrow()
+                .as_ref()
+                .map(|c| c.to_vec())
+                .unwrap_or_default();
+            for child in children {
+                walk(doc, child, origin, block);
+            }
+        }
+
+        let root = self.root_element().id;
+        let layout = *self.nodes[root].final_layout();
+        let block = Block {
+            x: layout.location.x,
+            y: layout.location.y,
+            width: layout.size.width,
+            height: layout.size.height,
+        };
+        walk(self, root, (0.0, 0.0), block);
+    }
+}
+
