@@ -85,9 +85,10 @@ impl BaseDocument {
     fn compute_child_layout_internal(
         &mut self,
         node_id: NodeId,
-        inputs: taffy::tree::LayoutInput,
+        mut inputs: taffy::tree::LayoutInput,
         block_ctx: Option<&mut BlockContext<'_>>,
     ) -> taffy::tree::LayoutOutput {
+        self.shrink_to_static_position(node_id, &mut inputs);
         let node = &mut self.nodes[dom_node_id(node_id)];
 
         let font_styles = node.primary_styles().map(|style| {
@@ -369,6 +370,58 @@ impl BaseDocument {
 
             _ => taffy::LayoutOutput::HIDDEN,
         }
+    }
+}
+
+impl BaseDocument {
+    /// An absolutely positioned box with `left`, `width` and `right` all `auto`
+    /// sits at its static position and shrinks to fit the space that is left
+    /// of the containing block *from there* (CSS 2.1 §10.3.7: the available
+    /// width is the containing block's width less the static position). The
+    /// block algorithm measures such a child against the whole containing
+    /// block, so a child of a block container with a large `padding-left`
+    /// comes out as wide as the whole block and overflows its right edge. The
+    /// static position of a block-level child of a block container is the
+    /// container's content edge, so that is what is taken off here.
+    ///
+    /// Children of inline formatting contexts are dealt with where their
+    /// static position is known (`inline::layout_abspos_child`).
+    fn shrink_to_static_position(&self, node_id: NodeId, inputs: &mut taffy::tree::LayoutInput) {
+        let taffy::AvailableSpace::Definite(width) = inputs.available_space.width else {
+            return;
+        };
+        let node = self.node_from_id(node_id);
+        let style = node.layout_style();
+        if style.position() != taffy::Position::Absolute
+            || !style.inset().left.is_auto()
+            || !style.inset().right.is_auto()
+            || !style.size().width.is_auto()
+        {
+            return;
+        }
+        let Some(parent) = node.layout_parent.get().map(|id| self.nodes.get(id)).flatten()
+        else {
+            return;
+        };
+        if parent.flags.is_inline_root()
+            || parent.flags.is_table_root()
+            || !matches!(
+                parent.taffy_display(),
+                Display::Block | Display::FlowRoot
+            )
+        {
+            return;
+        }
+        let parent_style = parent.layout_style();
+        if parent_style.direction() == taffy::Direction::Rtl {
+            return;
+        }
+        let padding_left = parent_style
+            .padding()
+            .left
+            .resolve_or_zero(inputs.parent_size.width, resolve_calc_value);
+        inputs.available_space.width =
+            taffy::AvailableSpace::Definite((width - padding_left).max(0.0));
     }
 }
 
