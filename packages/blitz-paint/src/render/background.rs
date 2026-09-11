@@ -263,6 +263,9 @@ impl ElementCx<'_, '_> {
         }
 
         for (row, row_position) in table.rows.iter().zip(rows.iter()) {
+            if row.anonymous {
+                continue;
+            }
             let row_node = &self.context.dom.get_node(row.node_id).unwrap();
             let Some(style) = row_node.primary_styles() else {
                 continue;

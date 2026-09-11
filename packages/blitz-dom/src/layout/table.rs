@@ -110,6 +110,10 @@ pub struct TableRow {
     // kind: TableItemKind,
     pub node_id: NodeId,
     pub height: f32,
+    /// An anonymous row wrapping cells that are direct children of the table.
+    /// It has no element of its own: `node_id` is the first cell, and nothing
+    /// (no background) is painted for the row itself.
+    pub anonymous: bool,
 }
 
 /// The used width of one border side: border widths are not adjusted for
@@ -491,6 +495,7 @@ fn collect_table_cells(
             rows.push(TableRow {
                 node_id,
                 height: 0.0,
+                anonymous: false,
             });
 
             let children = std::mem::take(&mut doc.nodes[node_id].children);
@@ -513,6 +518,19 @@ fn collect_table_cells(
         }
         DisplayInside::TableCell => {
             // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
+            // A cell that is a direct child of the table (or of a row group)
+            // gets an anonymous row (CSS 2.1 §17.2.1). Without one the cell
+            // would be placed on grid line 0 and its width never recorded as
+            // a column width, so every column came out `auto` and stretched.
+            if *row == 0 {
+                *row += 1;
+                cursor.start_row();
+                rows.push(TableRow {
+                    node_id,
+                    height: 0.0,
+                    anonymous: true,
+                });
+            }
             let stylo_style = &node.primary_styles().unwrap();
             let colspan: u16 = node
                 .attr(local_name!("colspan"))
@@ -620,11 +638,31 @@ fn collect_table_cells(
         | DisplayInside::Flex
         | DisplayInside::Grid => {
             node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
-            // Probably a table caption: ignore
-            // println!(
-            //     "Warning: ignoring non-table typed descendent of table ({:?})",
-            //     display.inside()
-            // );
+            // An out-of-flow child of the table (position: absolute/fixed) is
+            // not a cell, but it still has to be laid out and painted: it is
+            // positioned against the table box. Hand it to the grid as an
+            // absolutely positioned item, which Taffy sizes and places from its
+            // insets without giving it a track.
+            let stylo_style = &node.primary_styles().unwrap();
+            let position = stylo_style.get_box().position;
+            if matches!(
+                position,
+                style::computed_values::position::T::Absolute
+                    | style::computed_values::position::T::Fixed
+            ) {
+                let mut style = stylo_taffy::to_taffy_style(stylo_style);
+                style.position = taffy::Position::Absolute;
+                style.grid_column = taffy::Line {
+                    start: style_helpers::auto(),
+                    end: style_helpers::auto(),
+                };
+                style.grid_row = taffy::Line {
+                    start: style_helpers::auto(),
+                    end: style_helpers::auto(),
+                };
+                cells.push(TableCell { node_id, style });
+            }
+            // Otherwise probably a table caption: ignore
         }
         DisplayInside::TableColumnGroup | DisplayInside::TableColumn | DisplayInside::Table => {
             node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
