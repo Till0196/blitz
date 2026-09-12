@@ -374,15 +374,17 @@ impl BaseDocument {
 }
 
 impl BaseDocument {
-    /// An absolutely positioned box with `left`, `width` and `right` all `auto`
-    /// sits at its static position and shrinks to fit the space that is left
-    /// of the containing block *from there* (CSS 2.1 §10.3.7: the available
-    /// width is the containing block's width less the static position). The
-    /// block algorithm measures such a child against the whole containing
-    /// block, so a child of a block container with a large `padding-left`
-    /// comes out as wide as the whole block and overflows its right edge. The
-    /// static position of a block-level child of a block container is the
-    /// container's content edge, so that is what is taken off here.
+    /// An absolutely positioned box whose `width` is `auto` shrinks to fit only
+    /// the part of the containing block its insets leave it (CSS 2.1 §10.3.7).
+    /// With `left`, `width` and `right` all `auto` that is the space from the
+    /// box's static position to the containing block's right edge; with one
+    /// inset set it is the containing block's width less that inset. The block
+    /// algorithm measures such a child against the whole containing block, so
+    /// a child with a large `left` — or of a block container with a large
+    /// `padding-left` — comes out as wide as the whole block and overflows its
+    /// right edge. The static position of a block-level child of a block
+    /// container is the container's content edge, so that is what is taken off
+    /// in the all-`auto` case.
     ///
     /// Children of inline formatting contexts are dealt with where their
     /// static position is known (`inline::layout_abspos_child`).
@@ -392,11 +394,26 @@ impl BaseDocument {
         };
         let node = self.node_from_id(node_id);
         let style = node.layout_style();
-        if style.position() != taffy::Position::Absolute
-            || !style.inset().left.is_auto()
-            || !style.inset().right.is_auto()
-            || !style.size().width.is_auto()
-        {
+        if style.position() != taffy::Position::Absolute || !style.size().width.is_auto() {
+            return;
+        }
+        let inset = style.inset();
+        // One inset set (the other `auto`): the box shrinks from that edge.
+        if !inset.left.is_auto() || !inset.right.is_auto() {
+            if !inset.left.is_auto() && !inset.right.is_auto() {
+                return;
+            }
+            let containing = inputs.parent_size.width.unwrap_or(width);
+            let side = if inset.left.is_auto() {
+                inset.right
+            } else {
+                inset.left
+            };
+            let Some(side) = side.resolve_to_option(containing, resolve_calc_value) else {
+                return;
+            };
+            inputs.available_space.width =
+                taffy::AvailableSpace::Definite((containing - side).max(0.0).min(width));
             return;
         }
         let Some(parent) = node
