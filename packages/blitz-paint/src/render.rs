@@ -565,7 +565,12 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         parent_style_transform: Affine,
         clip_rect: Rect,
     ) {
-        let node = &self.dom.as_ref().tree()[node_id];
+        // A hoisted list (stacking context, `auto_hoisted`) is only as fresh
+        // as the last style flush: a node removed from the DOM since can
+        // still be named in one, and indexing the tree with its id panics.
+        let Some(node) = self.dom.as_ref().tree().get(node_id) else {
+            return;
+        };
 
         match &node.data {
             NodeData::Element(_) | NodeData::AnonymousBlock(_) => {
