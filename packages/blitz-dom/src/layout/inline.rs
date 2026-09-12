@@ -978,18 +978,29 @@ fn layout_abspos_child(
             .maybe_clamp(min_size, max_size);
     }
 
-    // With `left`, `width` and `right` all `auto` the box sits at its static
-    // position and shrinks to fit the containing block from there (CSS 2.1
-    // §10.3.7), not the whole of it.
-    let available_width = match (left, right) {
-        (None, None) if known_dimensions.width.is_none() => {
-            if direction == Direction::Rtl && is_inline_level {
-                static_position.x - area_offset.x
-            } else {
-                area_width - (static_position.x - area_offset.x)
+    // A shrink-to-fit box only gets the part of the containing block that is
+    // left over once its insets are taken off (CSS 2.1 §10.3.7): with `left`,
+    // `width` and `right` all `auto` it sits at its static position and shrinks
+    // from there, and with one inset set it shrinks from that edge.
+    let available_width = if known_dimensions.width.is_some() {
+        area_width
+    } else {
+        match (left, right) {
+            (None, None) => {
+                if direction == Direction::Rtl && is_inline_level {
+                    static_position.x - area_offset.x
+                } else {
+                    area_width - (static_position.x - area_offset.x)
+                }
             }
+            (Some(left), None) => {
+                area_width - left - margin.left.unwrap_or(0.0) - margin.right.unwrap_or(0.0)
+            }
+            (None, Some(right)) => {
+                area_width - right - margin.left.unwrap_or(0.0) - margin.right.unwrap_or(0.0)
+            }
+            (Some(_), Some(_)) => area_width,
         }
-        _ => area_width,
     }
     .max(0.0);
     let measured_size = tree
