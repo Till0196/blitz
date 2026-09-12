@@ -514,4 +514,3 @@ impl BaseDocument {
         walk(self, root, (0.0, 0.0), block);
     }
 }
-

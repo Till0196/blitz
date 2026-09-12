@@ -992,6 +992,23 @@ impl ElementCx<'_, '_> {
             }
         }
 
+        // Positioned (z-index: auto) descendants collected from below static
+        // children: above all in-flow content, in tree order.
+        if let Some(hoisted) = &self.node.auto_hoisted {
+            for hoisted_child in hoisted.iter() {
+                let pos = kurbo::Vec2 {
+                    x: hoisted_child.position.x as f64 * self.scale,
+                    y: hoisted_child.position.y as f64 * self.scale,
+                };
+                self.render_node(
+                    scene,
+                    hoisted_child.node_id,
+                    parent_style_transform.pre_translate(pos),
+                    clip_rect,
+                );
+            }
+        }
+
         // Positive z_index hoisted nodes
         if let Some(hoisted) = &self.node.stacking_context {
             for hoisted_child in hoisted.pos_z_hoisted_children() {

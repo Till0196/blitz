@@ -107,6 +107,16 @@ pub struct Node {
     /// The same as layout_children, but sorted by z-index
     pub paint_children: RefCell<Option<ThinVec<NodeId>>>,
     pub stacking_context: Option<Box<HoistedPaintChildren>>,
+    /// Positioned descendants with `z-index: auto` whose nearest positioned
+    /// (or clipping) ancestor is this node, but which live below one or more
+    /// in-flow (static, non-clipping) boxes in between. CSS 2.1 Appendix E
+    /// step 8 paints them above all in-flow content of the stacking
+    /// context, in tree order; keeping them inside their static parent's
+    /// paint list would let an earlier positioned sibling of that parent
+    /// cover them. They are painted after this node's regular children and
+    /// before its positive z-index hoisted children, offset by
+    /// `position` (their parent's offset relative to this node).
+    pub auto_hoisted: Option<Box<Vec<crate::layout::damage::HoistedPaintChild>>>,
 
     // Flags
     pub flags: NodeFlags,
@@ -388,6 +398,7 @@ impl Node {
             anonymous_blocks: ThinVec::new(),
             paint_children: RefCell::new(None),
             stacking_context: None,
+            auto_hoisted: None,
 
             flags: NodeFlags::empty(),
             data,

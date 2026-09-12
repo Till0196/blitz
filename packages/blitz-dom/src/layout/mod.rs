@@ -399,16 +399,17 @@ impl BaseDocument {
         {
             return;
         }
-        let Some(parent) = node.layout_parent.get().map(|id| self.nodes.get(id)).flatten()
+        let Some(parent) = node
+            .layout_parent
+            .get()
+            .map(|id| self.nodes.get(id))
+            .flatten()
         else {
             return;
         };
         if parent.flags.is_inline_root()
             || parent.flags.is_table_root()
-            || !matches!(
-                parent.taffy_display(),
-                Display::Block | Display::FlowRoot
-            )
+            || !matches!(parent.taffy_display(), Display::Block | Display::FlowRoot)
         {
             return;
         }

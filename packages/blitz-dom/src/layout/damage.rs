@@ -12,6 +12,7 @@ use style::properties::generated::longhands::position::computed_value::T as Posi
 use style::selector_parser::RestyleDamage;
 use style::url::ComputedUrl;
 use style::values::computed::Float;
+use style::values::computed::Overflow;
 use style::values::generics::image::Image as StyloImage;
 use style::values::specified::align::AlignFlags;
 use style::values::specified::box_::DisplayInside;
@@ -419,7 +420,7 @@ impl BaseDocument {
     }
 
     pub fn flush_styles_to_layout(&mut self, node_id: NodeId) {
-        self.flush_styles_to_layout_impl(node_id, None);
+        self.flush_styles_to_layout_impl(node_id, None, None);
     }
 
     /// Flush the image layers of nodes whose style changed during the last
@@ -536,9 +537,31 @@ impl BaseDocument {
         &mut self,
         node_id: NodeId,
         parent_stacking_context: Option<&mut HoistedPaintChildren>,
+        parent_auto_hoist: Option<&mut Vec<HoistedPaintChild>>,
     ) {
         let mut new_stacking_context: HoistedPaintChildren = HoistedPaintChildren::new();
         let stacking_context = &mut new_stacking_context;
+
+        // Whether this node collects the `z-index: auto` positioned
+        // descendants below its static children (see `Node::auto_hoisted`).
+        // A stacking context root, a positioned box, and a box that clips
+        // its overflow each start a new collection; anything else passes
+        // its parent's collection through.
+        let owns_auto_hoist = parent_stacking_context.is_none()
+            || parent_auto_hoist.is_none()
+            || self.nodes[node_id].primary_styles().is_some_and(|style| {
+                style.clone_position() != Position::Static
+                    || style.clone_overflow_x() != Overflow::Visible
+                    || style.clone_overflow_y() != Overflow::Visible
+            });
+        let mut own_auto_hoist: Vec<HoistedPaintChild> = Vec::new();
+        let (auto_hoist, hoist_start): (&mut Vec<HoistedPaintChild>, usize) = if owns_auto_hoist {
+            (&mut own_auto_hoist, 0)
+        } else {
+            let list = parent_auto_hoist.expect("a static box has its parent's collection");
+            let start = list.len();
+            (list, start)
+        };
 
         let incremental = self.incremental_layout;
         let display = {
@@ -570,13 +593,34 @@ impl BaseDocument {
             let is_flex_or_grid =
                 matches!(display.inside(), DisplayInside::Flex | DisplayInside::Grid);
 
-            // Recursively call flush_styles_to_layout on each child
+            // Recursively call flush_styles_to_layout on each child. A
+            // positioned child with `z-index: auto` under a static box is
+            // recorded in the collection *before* its own descendants, so
+            // that it paints below them.
             for &child in children.iter() {
+                let child_is_root = self.nodes[child].is_stacking_context_root(is_flex_or_grid);
+                let hoists_auto = !owns_auto_hoist
+                    && !child_is_root
+                    && self.nodes[child].primary_styles().is_some_and(|style| {
+                        style.clone_position() != Position::Static
+                            && style.clone_z_index().integer_or(0) == 0
+                    });
+                if hoists_auto {
+                    auto_hoist.push(HoistedPaintChild {
+                        node_id: child,
+                        z_index: 0,
+                        position: taffy::Point::ZERO,
+                    });
+                }
                 self.flush_styles_to_layout_impl(
                     child,
-                    match self.nodes[child].is_stacking_context_root(is_flex_or_grid) {
+                    match child_is_root {
                         true => None,
                         false => Some(stacking_context),
+                    },
+                    match child_is_root {
+                        true => None,
+                        false => Some(&mut *auto_hoist),
                     },
                 );
             }
@@ -620,6 +664,11 @@ impl BaseDocument {
                         z_index,
                         position: taffy::Point::ZERO,
                     })
+                } else if !owns_auto_hoist
+                    && position != Position::Static
+                    && !child.is_stacking_context_root(is_flex_or_grid)
+                {
+                    // Recorded in the parent's collection above.
                 } else {
                     paint_children.push(child_id);
                 }
@@ -635,6 +684,21 @@ impl BaseDocument {
 
             // Put children back
             *self.nodes[node_id].layout_children.borrow_mut() = Some(children);
+        }
+
+        // The collection: keep it here, or hand the entries this subtree
+        // added up to the parent, offset by this box's position.
+        if owns_auto_hoist {
+            let node = &mut self.nodes[node_id];
+            node.auto_hoisted = (!own_auto_hoist.is_empty()).then(|| Box::new(own_auto_hoist));
+        } else {
+            let position = self.nodes[node_id].final_layout().location;
+            let scroll_offset = *self.nodes[node_id].scroll_offset();
+            for hoisted in auto_hoist[hoist_start..].iter_mut() {
+                hoisted.position.x += position.x - scroll_offset.x as f32;
+                hoisted.position.y += position.y - scroll_offset.y as f32;
+            }
+            self.nodes[node_id].auto_hoisted = None;
         }
 
         if let Some(parent_stacking_context) = parent_stacking_context {
