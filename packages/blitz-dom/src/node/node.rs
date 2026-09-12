@@ -117,6 +117,11 @@ pub struct Node {
     /// before its positive z-index hoisted children, offset by
     /// `position` (their parent's offset relative to this node).
     pub auto_hoisted: Option<Box<Vec<crate::layout::damage::HoistedPaintChild>>>,
+    /// Whether this box or any box in its layout subtree is floated.
+    /// Refreshed each time styles are flushed to layout. A cached layout of
+    /// such a subtree cannot be reused inside a block formatting context,
+    /// because replaying it would not place its floats again.
+    pub subtree_has_floats: bool,
 
     // Flags
     pub flags: NodeFlags,
@@ -399,6 +404,7 @@ impl Node {
             paint_children: RefCell::new(None),
             stacking_context: None,
             auto_hoisted: None,
+            subtree_has_floats: false,
 
             flags: NodeFlags::empty(),
             data,

@@ -571,6 +571,10 @@ impl BaseDocument {
                 return;
             };
 
+            node.subtree_has_floats = node
+                .primary_styles()
+                .is_some_and(|style| style.clone_float() != Float::None);
+
             // In non-incremental mode we unconditionally clear the Taffy cache.
             // In incremental mode this is handled as part of damage propagation.
             if !incremental {
@@ -623,6 +627,14 @@ impl BaseDocument {
                         false => Some(&mut *auto_hoist),
                     },
                 );
+            }
+
+            // Floats anywhere below this box (see `Node::subtree_has_floats`)
+            if children
+                .iter()
+                .any(|child| self.nodes[*child].subtree_has_floats)
+            {
+                self.nodes[node_id].subtree_has_floats = true;
             }
 
             // Sort layout_children

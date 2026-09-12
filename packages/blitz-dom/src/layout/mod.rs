@@ -546,6 +546,16 @@ impl taffy::LayoutBlockContainer for BaseDocument {
         inputs: taffy::LayoutInput,
         block_ctx: Option<&mut BlockContext<'_>>,
     ) -> taffy::LayoutOutput {
+        // The cache key does not capture the block formatting context. A
+        // child laid out beside floats (its lines are shortened by them) or
+        // containing floats (laying it out is what places them for the
+        // siblings that follow) must be computed afresh.
+        #[cfg(feature = "floats")]
+        if let Some(ctx) = block_ctx.as_ref()
+            && (ctx.has_active_floats(0.0) || self.node_from_id(node_id).subtree_has_floats)
+        {
+            return self.compute_child_layout_internal(node_id, inputs, block_ctx);
+        }
         compute_cached_layout(self, node_id, inputs, |tree, node_id, inputs| {
             tree.compute_child_layout_internal(node_id, inputs, block_ctx)
         })
