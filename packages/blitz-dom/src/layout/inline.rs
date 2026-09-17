@@ -342,9 +342,16 @@ impl BaseDocument {
         );
 
         let pbw = container_pb.horizontal_components().sum() * scale;
+        // A box sized to its own max-content gets that width back here, as
+        // (content + padding + border) − (padding + border) in f32. With
+        // fractional padding/border (a border snapped to a non-integer device
+        // pixel ratio) that comes out a hair under the content width, and
+        // `word-break: break-all` then wraps the last glyph. A hundredth of a
+        // device pixel of slack keeps content that fits on its line.
+        const SLACK: f32 = 0.01;
         let width = known_dimensions
             .width
-            .map(|w| (w * scale) - pbw)
+            .map(|w| (w * scale) - pbw + SLACK)
             .unwrap_or_else(|| {
                 // TODO: Cache content widths.
                 //
@@ -512,7 +519,14 @@ impl BaseDocument {
             let mut has_active_floats = initial_slot.segment_id.is_some();
             let state = breaker.state_mut();
             state.set_layout_max_advance(width);
-            state.set_line_max_advance(initial_slot.width * scale);
+            // Without floats the slot is the whole content box: use `width` as
+            // is. Going through the slot (CSS px, back to device px) loses a
+            // hair to rounding, and content that exactly fits would wrap.
+            state.set_line_max_advance(if initial_slot.segment_id.is_some() {
+                initial_slot.width * scale + SLACK
+            } else {
+                width
+            });
             state.set_line_x(initial_slot.x * scale);
             state.set_line_y((initial_slot.y * scale) as f64);
 
@@ -537,7 +551,7 @@ impl BaseDocument {
                                 block_ctx.find_content_slot(min_y as f32, Clear::None, None);
                             has_active_floats = next_slot.segment_id.is_some();
 
-                            state.set_line_max_advance(next_slot.width * scale);
+                            state.set_line_max_advance(next_slot.width * scale + SLACK);
                             state.set_line_x(next_slot.x * scale);
                             state.set_line_y((next_slot.y * scale) as f64);
                         } else {
@@ -594,7 +608,7 @@ impl BaseDocument {
                             block_ctx.find_content_slot(min_y as f32, Clear::None, None);
                         has_active_floats = next_slot.segment_id.is_some();
 
-                        state.set_line_max_advance(next_slot.width * scale);
+                        state.set_line_max_advance(next_slot.width * scale + SLACK);
                         state.set_line_x(next_slot.x * scale);
                         state.set_line_y((next_slot.y * scale) as f64);
 
