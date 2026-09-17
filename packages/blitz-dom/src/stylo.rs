@@ -110,6 +110,8 @@ impl crate::document::BaseDocument {
 
                 if animation.state == AnimationState::Running && animation.has_ended(now) {
                     animation.state = AnimationState::Finished;
+                    self.finished_animations
+                        .push((node_id, animation.name.to_string()));
                 }
             }
 
@@ -119,6 +121,14 @@ impl crate::document::BaseDocument {
                 }
                 if transition.state == AnimationState::Running && transition.has_ended(now) {
                     transition.state = AnimationState::Finished;
+                    self.finished_transitions.push((
+                        node_id,
+                        transition
+                            .property_animation
+                            .property_id()
+                            .name()
+                            .to_string(),
+                    ));
                 }
             }
         }

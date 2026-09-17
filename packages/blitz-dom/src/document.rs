@@ -289,6 +289,16 @@ pub struct BaseDocument {
     // TODO: collapse animating state into a bitflags
     /// Whether there are active CSS animations/transitions (so we should re-render every frame)
     pub(crate) has_active_animations: bool,
+    /// When set, the document times its CSS animations and transitions from
+    /// this instant itself, and the time passed to [`resolve`](Self::resolve)
+    /// is ignored. Embedders which call `resolve` from many places (script
+    /// layout queries, painting) get one consistent clock this way.
+    pub(crate) animation_epoch: Option<web_time::Instant>,
+    /// CSS transitions (node, property name) and animations (node, animation
+    /// name) which finished since the embedder last took them; see
+    /// [`take_finished_transitions`](Self::take_finished_transitions).
+    pub(crate) finished_transitions: Vec<(NodeId, String)>,
+    pub(crate) finished_animations: Vec<(NodeId, String)>,
     /// Whether there is a `<canvas>` element in the DOM (so we should re-render every frame)
     pub(crate) has_canvas: bool,
     /// Whether there are subdocuments that are animating (so we should re-render every frame)
@@ -461,6 +471,9 @@ impl BaseDocument {
             active_node_id: None,
             mousedown_node_id: None,
             has_active_animations: false,
+            animation_epoch: None,
+            finished_transitions: Vec::new(),
+            finished_animations: Vec::new(),
             subdoc_is_animating: false,
             has_canvas: false,
             sub_document_nodes: HashSet::new(),
@@ -1988,6 +2001,32 @@ impl BaseDocument {
         self.get_node_mut(node_id)
             .and_then(|node| node.element_data_mut())
             .and_then(|el| el.sub_doc_data_mut())
+    }
+
+    /// Let the document keep its own clock for CSS animations and transitions,
+    /// starting now. See [`animation_epoch`](Self::animation_epoch).
+    pub fn start_animation_clock(&mut self) {
+        self.animation_epoch = Some(web_time::Instant::now());
+    }
+
+    /// Seconds on the document's animation clock, if it keeps one.
+    pub fn animation_time(&self) -> Option<f64> {
+        self.animation_epoch
+            .map(|epoch| epoch.elapsed().as_secs_f64())
+    }
+
+    /// The CSS transitions which finished since the last call: the node and
+    /// the property name, in the order they finished. An embedder dispatches
+    /// `transitionend` from these. Stylo drops a finished transition during
+    /// the restyle that follows, so they are recorded as they finish.
+    pub fn take_finished_transitions(&mut self) -> Vec<(NodeId, String)> {
+        std::mem::take(&mut self.finished_transitions)
+    }
+
+    /// The CSS animations which finished since the last call: the node and
+    /// the animation name. An embedder dispatches `animationend` from these.
+    pub fn take_finished_animations(&mut self) -> Vec<(NodeId, String)> {
+        std::mem::take(&mut self.finished_animations)
     }
 
     pub fn is_animating(&self) -> bool {
