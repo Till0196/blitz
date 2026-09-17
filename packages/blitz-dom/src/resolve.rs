@@ -80,6 +80,8 @@ impl BaseDocument {
         self.flush_pending_device_changes();
 
         // we need to resolve stylist first since it will need to drive our layout bits
+        let current_time_for_animations =
+            self.animation_time().unwrap_or(current_time_for_animations);
         self.resolve_stylist(current_time_for_animations);
         timer.record_time("style");
 
