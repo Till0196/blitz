@@ -734,6 +734,26 @@ impl BaseDocument {
                     let is_absolute = style.position() == Position::Absolute;
                     let direction = style.direction();
 
+                    // `vertical-align` (the `baseline-shift` / `alignment-baseline` longhands).
+                    // Parley sets every in-flow inline box on the baseline; the keywords that
+                    // align to the line box are applied below, after the line is laid out.
+                    let vertical_align = {
+                        use style::values::computed::AlignmentBaseline;
+                        use style::values::generics::box_::{
+                            BaselineShiftKeyword, GenericBaselineShift,
+                        };
+                        let boxed = style.style.get_box();
+                        match (&boxed.baseline_shift, boxed.alignment_baseline) {
+                            (GenericBaselineShift::Keyword(BaselineShiftKeyword::Top), _)
+                            | (_, AlignmentBaseline::TextTop) => Some(InlineBoxAlign::Top),
+                            (GenericBaselineShift::Keyword(BaselineShiftKeyword::Bottom), _)
+                            | (_, AlignmentBaseline::TextBottom) => Some(InlineBoxAlign::Bottom),
+                            (GenericBaselineShift::Keyword(BaselineShiftKeyword::Center), _)
+                            | (_, AlignmentBaseline::Middle) => Some(InlineBoxAlign::Middle),
+                            _ => None,
+                        }
+                    };
+
                     // The static position of an absolutely positioned box depends on the
                     // display its hypothetical box would have had (the display specified
                     // before position:absolute blockified it): inline-level boxes sit at
@@ -826,6 +846,22 @@ impl BaseDocument {
                             + margin.top.max(0.0)
                             + container_pb.top
                             + inset_offset.y;
+                        // Move the box off the baseline for `vertical-align: top | bottom |
+                        // middle`. The line box is as parley made it (the box counted as
+                        // ascent), only the box moves within it.
+                        if let Some(align) = vertical_align {
+                            let metrics = line.metrics();
+                            let line_top = metrics.block_min_coord / scale;
+                            let line_bottom = metrics.block_max_coord / scale;
+                            let outer = size.height + margin.top.max(0.0) + margin.bottom.max(0.0);
+                            let top = match align {
+                                InlineBoxAlign::Top => line_top,
+                                InlineBoxAlign::Bottom => line_bottom - outer,
+                                InlineBoxAlign::Middle => (line_top + line_bottom - outer) / 2.0,
+                            };
+                            layout.location.y =
+                                top + margin.top.max(0.0) + container_pb.top + inset_offset.y;
+                        }
                         layout.padding = padding; //.map(|p| p / scale);
                         layout.border = border; //.map(|p| p / scale);
                     }
@@ -874,6 +910,14 @@ impl BaseDocument {
                 && measured_size.height == 0.0,
         }
     }
+}
+
+/// Where `vertical-align` puts an inline box within its line box.
+#[derive(Clone, Copy)]
+enum InlineBoxAlign {
+    Top,
+    Bottom,
+    Middle,
 }
 
 #[inline(always)]
@@ -1281,5 +1325,63 @@ mod static_position_tests {
         let (doc, before, after) = make_doc();
         assert_eq!(doc.nodes[before].final_layout().location.y, 0.0);
         assert_eq!(doc.nodes[after].final_layout().location.y, 60.0);
+    }
+}
+
+#[cfg(test)]
+mod vertical_align_tests {
+    use crate::{Attribute, BaseDocument, DocumentConfig, NodeId, qual_name};
+    use blitz_traits::shell::{ColorScheme, Viewport};
+
+    /// Two inline-blocks of different heights in one line: a 60px one, and a 20px one
+    /// with the given `vertical-align`. Returns (document, the 20px box).
+    fn make_doc(vertical_align: &str) -> (BaseDocument, NodeId) {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let root_id = doc.root_node().id;
+        let style = |value: &str| Attribute {
+            name: qual_name!("style"),
+            value: value.to_string(),
+        };
+        let mut mutator = doc.mutate();
+        let html = mutator.create_element(qual_name!("html"), vec![]);
+        let body = mutator.create_element(qual_name!("body"), vec![style("margin:0")]);
+        let container = mutator.create_element(
+            qual_name!("div"),
+            vec![style("display:block;width:300px;line-height:1")],
+        );
+        let tall = mutator.create_element(
+            qual_name!("div"),
+            vec![style("display:inline-block;width:100px;height:60px")],
+        );
+        let short = mutator.create_element(
+            qual_name!("div"),
+            vec![style(&format!(
+                "display:inline-block;width:50px;height:20px;vertical-align:{vertical_align}"
+            ))],
+        );
+        mutator.append_children(container, &[tall, short]);
+        mutator.append_children(body, &[container]);
+        mutator.append_children(html, &[body]);
+        mutator.append_children(root_id, &[html]);
+        drop(mutator);
+        doc.resolve(0.0);
+        (doc, short)
+    }
+
+    /// `vertical-align: top` puts the box at the top of the line box, `bottom` at its bottom,
+    /// `middle` in between; the default sits it on the baseline (the bottom of the tall box).
+    #[test]
+    fn inline_blocks_follow_vertical_align_within_the_line() {
+        let (doc, short) = make_doc("baseline");
+        assert_eq!(doc.nodes[short].final_layout().location.y, 40.0);
+        let (doc, short) = make_doc("top");
+        assert_eq!(doc.nodes[short].final_layout().location.y, 0.0);
+        let (doc, short) = make_doc("bottom");
+        assert_eq!(doc.nodes[short].final_layout().location.y, 40.0);
+        let (doc, short) = make_doc("middle");
+        assert_eq!(doc.nodes[short].final_layout().location.y, 20.0);
     }
 }
