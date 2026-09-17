@@ -148,6 +148,10 @@ struct DecorationStackEntry {
     /// This node's (inherited) text colour, used for the glyphs of runs whose
     /// innermost node is this one.
     text_color: Color,
+    /// This node's (inherited) `text-shadow`, front-most first: colour and
+    /// offset in CSS pixels. Blur is not rendered; a blurred shadow is
+    /// drawn as a solid copy at its offset.
+    text_shadow: Vec<(Color, f64, f64)>,
     /// The decoration this node introduces as a decorating box, if any.
     decoration: Option<ResolvedDecoration>,
 }
@@ -158,6 +162,7 @@ fn resolve_decoration_entry(doc: &BaseDocument, node_id: NodeId) -> DecorationSt
         return DecorationStackEntry {
             node_id,
             text_color: Color::BLACK,
+            text_shadow: Vec::new(),
             decoration: None,
         };
     };
@@ -198,9 +203,28 @@ fn resolve_decoration_entry(doc: &BaseDocument, node_id: NodeId) -> DecorationSt
         }
     });
 
+    let text_shadow = itext
+        .text_shadow
+        .0
+        .iter()
+        .map(|shadow| {
+            let color = shadow
+                .color
+                .resolve_to_absolute(&itext.color)
+                .as_srgb_color();
+            (
+                color,
+                shadow.horizontal.px() as f64,
+                shadow.vertical.px() as f64,
+            )
+        })
+        .filter(|(color, _, _)| color.components[3] != 0.0)
+        .collect();
+
     DecorationStackEntry {
         node_id,
         text_color,
+        text_shadow,
         decoration,
     }
 }
@@ -645,6 +669,36 @@ pub(crate) fn stroke_text<'a>(
                 };
 
                 let normalized_coords: &[i16] = bytemuck::cast_slice(run.normalized_coords());
+                // `text-shadow` (css-text-decor-3 §4): shadows are painted below the
+                // text, the first one on top of the rest, so draw them back to front.
+                let shadows = stack
+                    .last()
+                    .map(|e| e.text_shadow.as_slice())
+                    .unwrap_or(&[]);
+                for &(shadow_color, dx, dy) in shadows.iter().rev() {
+                    let shadow_transform = transform.then_translate(kurbo::Vec2 {
+                        x: dx * scale,
+                        y: dy * scale,
+                    });
+                    scene.draw_glyphs(
+                        font,
+                        font_size,
+                        !FONT_EMBOLDEN_ENABLED, // hint
+                        normalized_coords,
+                        embolden,
+                        Fill::NonZero,
+                        &anyrender::Paint::from(shadow_color),
+                        1.0, // alpha
+                        shadow_transform,
+                        glyph_xform,
+                        glyph_run.positioned_glyphs().map(|glyph| anyrender::Glyph {
+                            id: glyph.id as _,
+                            x: glyph.x,
+                            y: glyph.y,
+                        }),
+                    );
+                }
+
                 scene.draw_glyphs(
                     font,
                     font_size,
