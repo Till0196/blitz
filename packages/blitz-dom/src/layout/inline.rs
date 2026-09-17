@@ -706,7 +706,13 @@ impl BaseDocument {
 
         // Store sizes and positions of inline boxes
         for line in inline_layout.layout.lines() {
+            // Whether any in-flow content (a glyph run or an in-flow inline box)
+            // precedes the current item on this line.
+            let mut preceded_by_content = false;
             for item in line.items() {
+                if let parley::layout::PositionedLayoutItem::GlyphRun(_) = item {
+                    preceded_by_content = true;
+                }
                 if let parley::layout::PositionedLayoutItem::InlineBox(ibox) = item {
                     let node = &self.nodes[NodeId::from_u64(ibox.id)];
                     let style = node.layout_style();
@@ -759,7 +765,10 @@ impl BaseDocument {
                     if is_absolute {
                         // Inline-level boxes are placed at the top of the line box they would
                         // have occupied (`ibox.y` is the baseline as out-of-flow boxes are
-                        // zero-sized), and block-level boxes below it.
+                        // zero-sized). A block-level box would have broken the line: if
+                        // in-flow content precedes it on this line it sits below that content
+                        // (the bottom of the line), otherwise the line's content would have
+                        // come after it, so it sits at the top of the line.
                         let line_metrics = line.metrics();
                         let static_position = taffy::Point {
                             x: if is_inline_level {
@@ -767,7 +776,7 @@ impl BaseDocument {
                             } else {
                                 container_pb.left
                             },
-                            y: if is_inline_level {
+                            y: if is_inline_level || !preceded_by_content {
                                 (line_metrics.block_min_coord / scale) + container_pb.top
                             } else {
                                 (line_metrics.block_max_coord / scale) + container_pb.top
@@ -788,6 +797,7 @@ impl BaseDocument {
                         layout.padding = padding; //.map(|p| p / scale);
                         layout.border = border; //.map(|p| p / scale);
                     } else {
+                        preceded_by_content = true;
                         // Re-measure the box to get its border-box size (this hits the layout
                         // cache). The size cannot be recovered from `ibox` dimensions as the
                         // space reserved in the line is clamped to be non-negative.
@@ -1213,4 +1223,63 @@ fn layout_abspos_child(
             margin: resolved_margin,
         },
     );
+}
+
+#[cfg(test)]
+mod static_position_tests {
+    use crate::{Attribute, BaseDocument, DocumentConfig, NodeId, qual_name};
+    use blitz_traits::shell::{ColorScheme, Viewport};
+
+    /// `<div style="width:300px"> [abs block] <div style="display:inline-block;width:100px;height:60px">
+    /// </div> [abs block] </div>`: the absolutely positioned blocks have no inset, so they
+    /// take their static position. Returns (first abs, second abs). There is no UA
+    /// stylesheet here, so `display: block` is set explicitly.
+    fn make_doc() -> (BaseDocument, NodeId, NodeId) {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let root_id = doc.root_node().id;
+        let style = |value: &str| Attribute {
+            name: qual_name!("style"),
+            value: value.to_string(),
+        };
+        let mut mutator = doc.mutate();
+        let html = mutator.create_element(qual_name!("html"), vec![]);
+        let body = mutator.create_element(qual_name!("body"), vec![style("margin:0")]);
+        let container = mutator.create_element(qual_name!("div"), vec![style("width:300px")]);
+        let before = mutator.create_element(
+            qual_name!("div"),
+            vec![style(
+                "display:block;position:absolute;width:50px;height:10px",
+            )],
+        );
+        let inline = mutator.create_element(
+            qual_name!("div"),
+            vec![style("display:inline-block;width:100px;height:60px")],
+        );
+        let after = mutator.create_element(
+            qual_name!("div"),
+            vec![style(
+                "display:block;position:absolute;width:50px;height:10px",
+            )],
+        );
+        mutator.append_children(container, &[before, inline, after]);
+        mutator.append_children(body, &[container]);
+        mutator.append_children(html, &[body]);
+        mutator.append_children(root_id, &[html]);
+        drop(mutator);
+        doc.resolve(0.0);
+        (doc, before, after)
+    }
+
+    /// CSS 2.1 §10.6.4: a block-level absolutely positioned box takes the position its
+    /// hypothetical in-flow box would have had. Before the line's content that is the top
+    /// of the line; after it, the bottom.
+    #[test]
+    fn block_level_abspos_before_inline_content_sits_at_the_top_of_the_line() {
+        let (doc, before, after) = make_doc();
+        assert_eq!(doc.nodes[before].final_layout().location.y, 0.0);
+        assert_eq!(doc.nodes[after].final_layout().location.y, 60.0);
+    }
 }
