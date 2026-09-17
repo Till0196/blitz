@@ -1418,6 +1418,21 @@ impl Node {
             }
         }
 
+        // Positioned `z-index: auto`/`0` descendants collected here (see
+        // `auto_hoisted`): painted above the regular children, so tested first.
+        if let Some(hoisted) = &self.auto_hoisted {
+            for hoisted_child in hoisted.iter().rev() {
+                let x = x - hoisted_child.position.x;
+                let y = y - hoisted_child.position.y;
+                if let Some(hit) = self
+                    .with(hoisted_child.node_id)
+                    .hit_inner(x, y, scale, scrollbar)
+                {
+                    return Some(hit);
+                }
+            }
+        }
+
         // Call `.hit()` on each child in turn. If any return `Some` then return that value. Else return `Some(self.id).
         for child_id in self.paint_children.borrow().iter().flatten().rev() {
             if let Some(hit) = self.with(*child_id).hit_inner(x, y, scale, scrollbar) {

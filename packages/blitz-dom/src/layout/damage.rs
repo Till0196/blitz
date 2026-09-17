@@ -600,11 +600,13 @@ impl BaseDocument {
             // Recursively call flush_styles_to_layout on each child. A
             // positioned child with `z-index: auto` under a static box is
             // recorded in the collection *before* its own descendants, so
-            // that it paints below them.
+            // that it paints below them. A positioned child with an explicit
+            // `z-index: 0` is a stacking context root, but step 8 paints it
+            // in the same pass as the `auto` boxes, in tree order, so it is
+            // recorded too (its own descendants stay inside it).
             for &child in children.iter() {
                 let child_is_root = self.nodes[child].is_stacking_context_root(is_flex_or_grid);
                 let hoists_auto = !owns_auto_hoist
-                    && !child_is_root
                     && self.nodes[child].primary_styles().is_some_and(|style| {
                         style.clone_position() != Position::Static
                             && style.clone_z_index().integer_or(0) == 0
@@ -676,10 +678,7 @@ impl BaseDocument {
                         z_index,
                         position: taffy::Point::ZERO,
                     })
-                } else if !owns_auto_hoist
-                    && position != Position::Static
-                    && !child.is_stacking_context_root(is_flex_or_grid)
-                {
+                } else if !owns_auto_hoist && position != Position::Static {
                     // Recorded in the parent's collection above.
                 } else {
                     paint_children.push(child_id);
