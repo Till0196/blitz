@@ -39,9 +39,6 @@ pub struct DefaultScriptFetcher;
 impl ScriptFetcher for DefaultScriptFetcher {
     fn fetch(&self, url: &Url) -> Result<String, FetchError> {
         match url.scheme() {
-            // `file:` URLs need a filesystem; on wasm32 the `url` crate has no
-            // `to_file_path` and there is no filesystem to read from.
-            #[cfg(not(target_arch = "wasm32"))]
             "file" => {
                 let path = url
                     .to_file_path()
