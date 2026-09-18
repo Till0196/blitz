@@ -397,15 +397,23 @@ impl ScriptDocument {
             return;
         };
 
-        let sender = self.timer_thread.get_or_insert_with(|| {
-            let (tx, rx) = channel::<Instant>();
-            let waker = Arc::clone(&self.waker);
-            std::thread::Builder::new()
-                .name("blitz-vibey-script-timers".to_string())
-                .spawn(move || timer_thread_main(rx, waker))
-                .expect("failed to spawn timer thread");
-            tx
-        });
+        let sender = match &self.timer_thread {
+            Some(sender) => sender,
+            None => {
+                let (tx, rx) = channel::<Instant>();
+                let waker = Arc::clone(&self.waker);
+                let spawned = std::thread::Builder::new()
+                    .name("blitz-vibey-script-timers".to_string())
+                    .spawn(move || timer_thread_main(rx, waker));
+                if spawned.is_err() {
+                    // No threads on this platform (e.g. wasm): embedders must
+                    // poll `next_timer_deadline` themselves.
+                    self.timer_thread_enabled = false;
+                    return;
+                }
+                self.timer_thread.insert(tx)
+            }
+        };
 
         // If the thread has exited (channel disconnected) drop the sender so a
         // new thread is spawned next time.
