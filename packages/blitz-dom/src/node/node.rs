@@ -1076,10 +1076,12 @@ impl Node {
     ///
     /// ```text
     /// <html>
-    ///   <head />
+    ///   <head>
+    ///   </head>
     ///   <body>
     ///     <main id="main">
-    ///       <div class="arbitrary-class" />
+    ///       <div class="arbitrary-class">
+    ///       </div>
     ///     </main>
     ///   </body>
     /// </html>
@@ -1100,7 +1102,6 @@ impl Node {
 
     fn write_outer_html_in_style(&self, writer: &mut String, style: OutputStyle, nesting: usize) {
         const INDENT: &str = "  ";
-        let has_children = !self.children.is_empty();
         let current_color = self
             .primary_styles()
             .map(|style| style.clone_color())
@@ -1117,7 +1118,37 @@ impl Node {
                         writer.push_str(INDENT);
                     }
                 }
-                writer.push_str(data.content.as_str());
+                // HTML fragment serialization: text is escaped, except as the
+                // contents of the raw text elements, which are written as is.
+                let raw = self
+                    .parent
+                    .and_then(|parent| self.tree()[parent].data.downcast_element())
+                    .is_some_and(|parent| {
+                        parent.name.ns == markup5ever::ns!(html)
+                            && matches!(
+                                parent.name.local.as_ref(),
+                                "style"
+                                    | "script"
+                                    | "xmp"
+                                    | "iframe"
+                                    | "noembed"
+                                    | "noframes"
+                                    | "plaintext"
+                                    | "noscript"
+                            )
+                    });
+                if raw {
+                    writer.push_str(data.content.as_str());
+                } else {
+                    // U+00A0 is `&nbsp;` in HTML; inside foreign content (SVG,
+                    // which is also serialized to be parsed as XML) the
+                    // numeric reference, as XML has no `nbsp` entity.
+                    let in_html = self
+                        .parent
+                        .and_then(|parent| self.tree()[parent].data.downcast_element())
+                        .is_none_or(|parent| parent.name.ns == markup5ever::ns!(html));
+                    escape_text(&data.content, in_html, writer);
+                }
                 if matches!(style, OutputStyle::Pretty) {
                     writer.push('\n');
                 }
@@ -1146,15 +1177,38 @@ impl Node {
                     }
                     writer.push('"');
                 }
-                if !has_children {
-                    writer.push_str(" /");
-                }
                 writer.push('>');
                 if matches!(style, OutputStyle::Pretty) {
                     writer.push('\n');
                 }
 
-                if has_children {
+                // HTML fragment serialization: a void element has no end tag
+                // (and no children); every other element has one, even when it
+                // is empty -- `<div />` is not self-closing in HTML and would
+                // swallow the following siblings when parsed back.
+                let is_void = data.name.ns == markup5ever::ns!(html)
+                    && matches!(
+                        data.name.local.as_ref(),
+                        "area"
+                            | "base"
+                            | "basefont"
+                            | "bgsound"
+                            | "br"
+                            | "col"
+                            | "embed"
+                            | "frame"
+                            | "hr"
+                            | "img"
+                            | "input"
+                            | "keygen"
+                            | "link"
+                            | "meta"
+                            | "param"
+                            | "source"
+                            | "track"
+                            | "wbr"
+                    );
+                if !is_void {
                     for &child_id in &self.children {
                         self.tree()[child_id].write_outer_html_in_style(writer, style, nesting + 1);
                     }
@@ -1739,6 +1793,20 @@ impl std::fmt::Debug for Node {
             // .field("unrounded_layout", &self.unrounded_layout)
             // .field("final_layout", &self.final_layout)
             .finish()
+    }
+}
+
+/// Escape text for HTML fragment serialization: `&`, `<`, `>` and U+00A0.
+fn escape_text(text: &str, in_html: bool, writer: &mut String) {
+    for c in text.chars() {
+        match c {
+            '&' => writer.push_str("&amp;"),
+            '<' => writer.push_str("&lt;"),
+            '>' => writer.push_str("&gt;"),
+            '\u{a0}' if in_html => writer.push_str("&nbsp;"),
+            '\u{a0}' => writer.push_str("&#160;"),
+            c => writer.push(c),
+        }
     }
 }
 

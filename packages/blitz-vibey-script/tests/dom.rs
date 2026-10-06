@@ -609,3 +609,33 @@ fn elements_inside_display_none_have_no_geometry() {
     );
     assert_eq!(text_of_selector(&doc, "#out"), "180,1|0,0,0,0,0,0");
 }
+
+/// HTML fragment serialization: an empty non-void element gets an end tag
+/// (`<div />` would not be closed when parsed back as HTML), a void element
+/// gets none, text is escaped except inside raw text elements, and the
+/// result parses back to the same tree.
+#[test]
+fn outer_html_is_serialized_as_html() {
+    let doc = doc_from_html(
+        r#"
+        <html><body>
+            <div id="src"><div class="empty"></div><br><span>a&amp;b&lt;c&gt;&nbsp;d</span><script>if (1 < 2) {}</script></div>
+            <div id="copy"></div>
+            <div id="out"></div>
+            <script>
+                const html = document.getElementById("src").outerHTML;
+                const copy = document.getElementById("copy");
+                copy.innerHTML = html;
+                const parsed = copy.firstChild;
+                document.getElementById("out").textContent =
+                    html + "|" + parsed.children.length + "|" +
+                    parsed.querySelector(".empty").children.length;
+            </script>
+        </body></html>
+        "#,
+    );
+    assert_eq!(
+        text_of_selector(&doc, "#out"),
+        "<div id=\"src\"><div class=\"empty\"></div><br><span>a&amp;b&lt;c&gt;&nbsp;d</span><script>if (1 < 2) {}</script></div>|4|0"
+    );
+}
