@@ -868,9 +868,8 @@ impl BaseDocument {
                         // middle`. The line box is as parley made it (the box counted as
                         // ascent), only the box moves within it.
                         if let Some(align) = vertical_align {
-                            let metrics = line.metrics();
-                            let line_top = metrics.block_min_coord / scale;
-                            let line_bottom = metrics.block_max_coord / scale;
+                            let (line_top, line_bottom) = css_line_box(line.metrics());
+                            let (line_top, line_bottom) = (line_top / scale, line_bottom / scale);
                             let outer = size.height + margin.top.max(0.0) + margin.bottom.max(0.0);
                             let top = match align {
                                 InlineBoxAlign::Top => line_top,
@@ -1346,6 +1345,24 @@ mod static_position_tests {
     }
 }
 
+/// The top and bottom of a line's box as CSS lays it out (CSS 2.1 §10.8.1):
+/// the half-leading is added to or, when negative, taken from the ascent and
+/// descent. Parley's `block_min_coord`/`block_max_coord` clamp a negative
+/// leading to zero (they bound the selection), so a line whose font is taller
+/// than its `line-height` would reach past the box the line occupies. The
+/// rounding follows Parley's quantized line metrics (which these layouts use).
+fn css_line_box(metrics: &parley::LineMetrics) -> (f32, f32) {
+    let ascent = metrics.ascent.round();
+    let descent = metrics.descent.round();
+    let leading = metrics.line_height - (ascent + descent);
+    let above = (leading * 0.5).floor();
+    let below = leading.round() - above;
+    (
+        metrics.baseline - ascent - above,
+        metrics.baseline + descent + below,
+    )
+}
+
 #[cfg(test)]
 mod vertical_align_tests {
     use crate::{Attribute, BaseDocument, DocumentConfig, NodeId, qual_name};
@@ -1444,5 +1461,44 @@ mod vertical_align_tests {
                 "scale {scale}"
             );
         }
+    }
+
+    /// A box aligned to the bottom of a line whose `line-height` is smaller
+    /// than its font's ascent and descent sits at the bottom of the line box
+    /// the line occupies (`line-height` tall), not below it.
+    #[test]
+    fn bottom_aligned_box_stays_in_a_line_shorter_than_its_font() {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(800, 600, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let root_id = doc.root_node().id;
+        let style = |value: &str| Attribute {
+            name: qual_name!("style"),
+            value: value.to_string(),
+        };
+        let mut mutator = doc.mutate();
+        let html = mutator.create_element(qual_name!("html"), vec![]);
+        let body = mutator.create_element(qual_name!("body"), vec![style("margin:0")]);
+        let container = mutator.create_element(
+            qual_name!("div"),
+            vec![style(
+                "display:block;width:300px;font-size:24px;line-height:12px",
+            )],
+        );
+        let text = mutator.create_text_node("A");
+        let boxed = mutator.create_element(
+            qual_name!("div"),
+            vec![style(
+                "display:inline-block;width:12px;height:12px;vertical-align:bottom",
+            )],
+        );
+        mutator.append_children(container, &[text, boxed]);
+        mutator.append_children(body, &[container]);
+        mutator.append_children(html, &[body]);
+        mutator.append_children(root_id, &[html]);
+        drop(mutator);
+        doc.resolve(0.0);
+        assert_eq!(doc.nodes[boxed].final_layout().location.y, 0.0);
     }
 }
