@@ -598,15 +598,22 @@ impl BaseDocument {
                 matches!(display.inside(), DisplayInside::Flex | DisplayInside::Grid);
 
             // Recursively call flush_styles_to_layout on each child. A
-            // positioned child with `z-index: auto` under a static box is
-            // recorded in the collection *before* its own descendants, so
-            // that it paints below them. A positioned child with an explicit
-            // `z-index: 0` is a stacking context root, but step 8 paints it
-            // in the same pass as the `auto` boxes, in tree order, so it is
-            // recorded too (its own descendants stay inside it).
+            // positioned child with `z-index: auto` is recorded in the
+            // collection *before* its own descendants, so that it paints below
+            // them. A positioned child with an explicit `z-index: 0` is a
+            // stacking context root, but step 8 paints it in the same pass as
+            // the `auto` boxes, in tree order, so it is recorded too (its own
+            // descendants stay inside it). This includes the collecting box's
+            // own positioned children: step 8 interleaves them in tree order
+            // with those hoisted from below its static children, so they go
+            // in the same list rather than among its regular children (which
+            // would paint them all below the hoisted ones). Flex and grid
+            // containers keep theirs as regular children, which are painted in
+            // order-modified document order.
+            let hoists_own_children = !owns_auto_hoist || !is_flex_or_grid;
             for &child in children.iter() {
                 let child_is_root = self.nodes[child].is_stacking_context_root(is_flex_or_grid);
-                let hoists_auto = !owns_auto_hoist
+                let hoists_auto = hoists_own_children
                     && self.nodes[child].primary_styles().is_some_and(|style| {
                         style.clone_position() != Position::Static
                             && style.clone_z_index().integer_or(0) == 0
@@ -678,8 +685,8 @@ impl BaseDocument {
                         z_index,
                         position: taffy::Point::ZERO,
                     })
-                } else if !owns_auto_hoist && position != Position::Static {
-                    // Recorded in the parent's collection above.
+                } else if hoists_own_children && position != Position::Static {
+                    // Recorded in the collection above.
                 } else {
                     paint_children.push(child_id);
                 }
@@ -771,5 +778,75 @@ fn node_to_paint_order(node: &Node, is_flex_or_grid: bool) -> (i32, i32) {
             position_to_order(position) + float_to_order(style.clone_float()),
             0,
         )
+    }
+}
+
+#[cfg(test)]
+mod auto_hoist_order_tests {
+    use crate::{Attribute, BaseDocument, DocumentConfig, NodeId, qual_name};
+    use blitz_traits::shell::{ColorScheme, Viewport};
+
+    fn style(value: &str) -> Attribute {
+        Attribute {
+            name: qual_name!("style"),
+            value: value.to_string(),
+        }
+    }
+
+    /// CSS 2.1 Appendix E step 8: the positioned descendants of a stacking
+    /// context with `z-index: auto` or `0` paint in tree order. A `z-index: 0`
+    /// box inside a static child of a positioned box comes first in tree
+    /// order, so it must not paint above a positioned sibling that follows
+    /// that static child.
+    #[test]
+    fn positioned_children_interleave_with_hoisted_descendants_in_tree_order() {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let root_id = doc.root_node().id;
+        let mut mutator = doc.mutate();
+        let html = mutator.create_element(qual_name!("html"), vec![]);
+        let body = mutator.create_element(
+            qual_name!("body"),
+            vec![style("display:block;margin:0;position:relative")],
+        );
+        let wrapper = mutator.create_element(qual_name!("div"), vec![style("display:block")]);
+        let earlier = mutator.create_element(
+            qual_name!("div"),
+            vec![style(
+                "display:block;position:absolute;z-index:0;width:50px;height:50px",
+            )],
+        );
+        let later = mutator.create_element(
+            qual_name!("div"),
+            vec![style(
+                "display:block;position:absolute;width:50px;height:50px",
+            )],
+        );
+        mutator.append_children(wrapper, &[earlier]);
+        mutator.append_children(body, &[wrapper, later]);
+        mutator.append_children(html, &[body]);
+        mutator.append_children(root_id, &[html]);
+        drop(mutator);
+        doc.resolve(0.0);
+
+        let order: Vec<NodeId> = doc.nodes[body]
+            .auto_hoisted
+            .as_ref()
+            .expect("the positioned body collects its positioned descendants")
+            .iter()
+            .map(|child| child.node_id)
+            .collect();
+        assert_eq!(order, vec![earlier, later]);
+        assert!(
+            !doc.nodes[body]
+                .paint_children
+                .borrow()
+                .iter()
+                .flatten()
+                .any(|id| *id == later),
+            "the positioned child is painted from the collection, not twice"
+        );
     }
 }
