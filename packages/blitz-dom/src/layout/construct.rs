@@ -1399,7 +1399,9 @@ mod inline_pseudo_tests {
         drop(mutator);
         doc.resolve(0.0);
 
-        let before = doc.nodes[icon].before().expect("::before node should exist");
+        let before = doc.nodes[icon]
+            .before()
+            .expect("::before node should exist");
         assert_eq!(line_count(&doc, before), 1);
 
         let mut mutator = doc.mutate();
