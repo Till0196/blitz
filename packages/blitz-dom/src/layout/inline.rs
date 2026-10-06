@@ -316,8 +316,12 @@ impl BaseDocument {
                 let output = self.compute_child_layout(taffy::NodeId::from(ibox.id), child_inputs);
                 ibox.width = (margin.left + margin.right + output.size.width) * scale;
                 // Vertical margins adjust the space the box reserves in the line, but the
-                // reserved space cannot be negative.
-                ibox.height = (margin.top + margin.bottom + output.size.height).max(0.0) * scale;
+                // reserved space cannot be negative. It is whole device pixels: Parley
+                // quantizes a line's ascent but not its line height, so a fractional box
+                // height (e.g. at a 0.67 scale factor) gives the line a negative leading,
+                // which is floored and moves the whole line up by a device pixel.
+                ibox.height =
+                    ((margin.top + margin.bottom + output.size.height).max(0.0) * scale).round();
             }
         }
 
@@ -1397,5 +1401,48 @@ mod vertical_align_tests {
         assert_eq!(doc.nodes[short].final_layout().location.y, 40.0);
         let (doc, short) = make_doc("middle");
         assert_eq!(doc.nodes[short].final_layout().location.y, 20.0);
+    }
+
+    /// A box taller than the line's strut with `vertical-align: top` sits at the top of
+    /// the line box at any scale factor.
+    #[test]
+    fn top_aligned_box_starts_at_the_top_of_the_line_when_scaled() {
+        for scale in [0.5, 0.67, 1.0, 1.33] {
+            let mut doc = BaseDocument::new(DocumentConfig {
+                viewport: Some(Viewport::new(800, 600, scale, ColorScheme::Light)),
+                ..Default::default()
+            });
+            let root_id = doc.root_node().id;
+            let style = |value: &str| Attribute {
+                name: qual_name!("style"),
+                value: value.to_string(),
+            };
+            let mut mutator = doc.mutate();
+            let html = mutator.create_element(qual_name!("html"), vec![]);
+            let body = mutator.create_element(qual_name!("body"), vec![style("margin:0")]);
+            let container = mutator.create_element(
+                qual_name!("div"),
+                vec![style(
+                    "display:block;width:300px;font-size:20px;line-height:20px",
+                )],
+            );
+            let logo = mutator.create_element(
+                qual_name!("div"),
+                vec![style(
+                    "display:inline-block;width:82px;height:46px;vertical-align:top",
+                )],
+            );
+            mutator.append_children(container, &[logo]);
+            mutator.append_children(body, &[container]);
+            mutator.append_children(html, &[body]);
+            mutator.append_children(root_id, &[html]);
+            drop(mutator);
+            doc.resolve(0.0);
+            assert_eq!(
+                doc.nodes[logo].unrounded_layout().location.y,
+                0.0,
+                "scale {scale}"
+            );
+        }
     }
 }
