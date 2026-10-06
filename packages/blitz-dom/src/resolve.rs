@@ -410,6 +410,11 @@ impl BaseDocument {
 /// page. This pass runs after layout and moves such boxes to where their
 /// insets say relative to the right containing block. Sizes are left as they
 /// were laid out; it is the placement that is corrected.
+///
+/// A `position: fixed` box's containing block is the viewport (CSS Positioned
+/// Layout §3.1), not its nearest positioned ancestor -- unless an ancestor has
+/// a transform, perspective, filter or paint/layout containment, which makes
+/// that ancestor the containing block for fixed (and absolute) descendants.
 impl BaseDocument {
     fn place_absolute_boxes_in_their_containing_blocks(&mut self) {
         use style::computed_values::position::T as Position;
@@ -424,7 +429,31 @@ impl BaseDocument {
             height: f32,
         }
 
-        fn walk(doc: &mut BaseDocument, node_id: NodeId, parent_origin: (f32, f32), block: Block) {
+        /// Whether the box is the containing block of its fixed (and absolute)
+        /// descendants because of a transform, perspective, filter or
+        /// paint/layout containment (CSS Transforms §2, Filter Effects §5,
+        /// CSS Containment §3).
+        fn contains_fixed(style: &style::properties::ComputedValues) -> bool {
+            use style::values::computed::Contain;
+            let box_style = style.get_box();
+            !box_style.transform.0.is_empty()
+                || !matches!(
+                    box_style.perspective,
+                    style::values::generics::box_::Perspective::None
+                )
+                || !style.get_effects().filter.0.is_empty()
+                || box_style
+                    .contain
+                    .intersects(Contain::PAINT | Contain::LAYOUT)
+        }
+
+        fn walk(
+            doc: &mut BaseDocument,
+            node_id: NodeId,
+            parent_origin: (f32, f32),
+            block: Block,
+            fixed_block: Block,
+        ) {
             let Some(node) = doc.nodes.get(node_id) else {
                 return;
             };
@@ -432,14 +461,26 @@ impl BaseDocument {
                 .primary_styles()
                 .map(|style| style.clone_position())
                 .unwrap_or(Position::Static);
-            let parent_is_block = node
-                .layout_parent
-                .get()
-                .and_then(|id| doc.nodes.get(id))
-                .and_then(|parent| parent.primary_styles().map(|s| s.clone_position()))
-                .is_none_or(|p| p != Position::Static);
+            let parent = node.layout_parent.get().and_then(|id| doc.nodes.get(id));
+            let parent_styles = parent.and_then(|parent| parent.primary_styles());
+            let parent_contains_fixed = parent_styles
+                .as_ref()
+                .is_some_and(|style| contains_fixed(style));
+            let parent_is_block = parent_contains_fixed
+                || parent_styles
+                    .as_ref()
+                    .map(|style| style.clone_position())
+                    .is_none_or(|p| p != Position::Static);
+            drop(parent_styles);
 
-            if matches!(position, Position::Absolute | Position::Fixed) && !parent_is_block {
+            // The layout algorithms already placed it against its layout
+            // parent; move it only when that is not its containing block.
+            let block_of_box = match position {
+                Position::Absolute if !parent_is_block => Some(block),
+                Position::Fixed if !parent_contains_fixed => Some(fixed_block),
+                _ => None,
+            };
+            if let Some(block) = block_of_box {
                 let layout = *node.final_layout();
                 let style = node.layout_style();
                 let inset = style.inset();
@@ -484,15 +525,24 @@ impl BaseDocument {
                 parent_origin.0 + layout.location.x,
                 parent_origin.1 + layout.location.y,
             );
-            let block = if position != Position::Static {
-                Block {
-                    x: origin.0 + layout.border.left,
-                    y: origin.1 + layout.border.top,
-                    width: layout.size.width - layout.border.left - layout.border.right,
-                    height: layout.size.height - layout.border.top - layout.border.bottom,
-                }
+            let establishes_fixed = node
+                .primary_styles()
+                .is_some_and(|style| contains_fixed(&style));
+            let padding_box = Block {
+                x: origin.0 + layout.border.left,
+                y: origin.1 + layout.border.top,
+                width: layout.size.width - layout.border.left - layout.border.right,
+                height: layout.size.height - layout.border.top - layout.border.bottom,
+            };
+            let block = if position != Position::Static || establishes_fixed {
+                padding_box
             } else {
                 block
+            };
+            let fixed_block = if establishes_fixed {
+                padding_box
+            } else {
+                fixed_block
             };
             let children: Vec<NodeId> = node
                 .layout_children
@@ -501,7 +551,7 @@ impl BaseDocument {
                 .map(|c| c.to_vec())
                 .unwrap_or_default();
             for child in children {
-                walk(doc, child, origin, block);
+                walk(doc, child, origin, block, fixed_block);
             }
         }
 
@@ -513,6 +563,80 @@ impl BaseDocument {
             width: layout.size.width,
             height: layout.size.height,
         };
-        walk(self, root, (0.0, 0.0), block);
+        // The viewport, where it is on the page (it scrolls over the page).
+        let viewport = self.stylist.device().au_viewport_size();
+        let fixed_block = Block {
+            x: self.viewport_scroll.x as f32,
+            y: self.viewport_scroll.y as f32,
+            width: viewport.width.to_f32_px(),
+            height: viewport.height.to_f32_px(),
+        };
+        walk(self, root, (0.0, 0.0), block, fixed_block);
+    }
+}
+
+#[cfg(test)]
+mod fixed_position_tests {
+    use crate::{Attribute, BaseDocument, DocumentConfig, NodeId, qual_name};
+    use blitz_traits::shell::{ColorScheme, Viewport};
+
+    fn style(value: &str) -> Attribute {
+        Attribute {
+            name: qual_name!("style"),
+            value: value.to_string(),
+        }
+    }
+
+    /// Lays out `<body>` > a box styled `outer` at (320, 130) > a fixed box at
+    /// (290, 130) of its containing block, and returns where the fixed box is
+    /// on the page.
+    fn fixed_in(outer: &str) -> (f32, f32) {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(800, 600, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let root_id = doc.root_node().id;
+        let mut mutator = doc.mutate();
+        let html = mutator.create_element(qual_name!("html"), vec![]);
+        let body =
+            mutator.create_element(qual_name!("body"), vec![style("display:block;margin:0")]);
+        let container = mutator.create_element(
+            qual_name!("div"),
+            vec![style(&format!(
+                "display:block;left:320px;top:130px;width:300px;height:300px;{outer}"
+            ))],
+        );
+        let fixed: NodeId = mutator.create_element(
+            qual_name!("div"),
+            vec![style(
+                "display:block;position:fixed;left:290px;top:130px;width:50px;height:50px",
+            )],
+        );
+        mutator.append_children(container, &[fixed]);
+        mutator.append_children(body, &[container]);
+        mutator.append_children(html, &[body]);
+        mutator.append_children(root_id, &[html]);
+        drop(mutator);
+        doc.resolve(0.0);
+        let at = doc.nodes[fixed].absolute_position(0.0, 0.0);
+        (at.x, at.y)
+    }
+
+    /// CSS Positioned Layout §3.1: the containing block of a fixed box is the
+    /// viewport, not its positioned ancestor.
+    #[test]
+    fn a_fixed_box_is_placed_against_the_viewport() {
+        assert_eq!(fixed_in("position:absolute"), (290.0, 130.0));
+        assert_eq!(fixed_in("position:relative"), (290.0, 130.0));
+    }
+
+    /// An ancestor with a transform is the containing block of its fixed
+    /// descendants (CSS Transforms §2).
+    #[test]
+    fn a_transformed_ancestor_contains_fixed_boxes() {
+        assert_eq!(
+            fixed_in("position:absolute;transform:translate(0px, 0px)"),
+            (320.0 + 290.0, 130.0 + 130.0)
+        );
     }
 }
