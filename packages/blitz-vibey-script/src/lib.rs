@@ -60,6 +60,8 @@ pub mod host {
 
     /// The document behind this script context.
     pub fn document_of(context: &mut Context) -> Option<Rc<RefCell<BaseDocument>>> {
-        crate::dom::dom_ctx(context).ok().map(|ctx| Rc::clone(&ctx.doc))
+        crate::dom::dom_ctx(context)
+            .ok()
+            .map(|ctx| Rc::clone(&ctx.doc))
     }
 }
