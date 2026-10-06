@@ -612,8 +612,17 @@ impl BaseDocument {
             // order-modified document order.
             let hoists_own_children = !owns_auto_hoist || !is_flex_or_grid;
             for &child in children.iter() {
-                let child_is_root = self.nodes[child].is_stacking_context_root(is_flex_or_grid);
+                // A `display: none` subtree generates no boxes, so nothing in it
+                // is painted -- positioned descendants included. Keep whatever it
+                // contains out of this box's collection and stacking context
+                // (its layout is stale and must not be painted).
+                let child_hidden = self.nodes[child]
+                    .display_style()
+                    .is_some_and(|display| display.inside() == DisplayInside::None);
+                let child_is_root =
+                    child_hidden || self.nodes[child].is_stacking_context_root(is_flex_or_grid);
                 let hoists_auto = hoists_own_children
+                    && !child_hidden
                     && self.nodes[child].primary_styles().is_some_and(|style| {
                         style.clone_position() != Position::Static
                             && style.clone_z_index().integer_or(0) == 0
@@ -675,11 +684,17 @@ impl BaseDocument {
 
                 let position = style.clone_position();
                 let z_index = style.clone_z_index().integer_or(0);
+                let hidden = child
+                    .display_style()
+                    .is_some_and(|display| display.inside() == DisplayInside::None);
 
                 // TODO: more complete hoisting detection
                 // z-index applies to static flex/grid items too
                 // (css-flexbox-1 §painting, css-grid-1 §z-order).
-                if z_index != 0 && (position != Position::Static || is_flex_or_grid) {
+                if hidden {
+                    // Painted as a regular child, which paints nothing.
+                    paint_children.push(child_id);
+                } else if z_index != 0 && (position != Position::Static || is_flex_or_grid) {
                     stacking_context.children.push(HoistedPaintChild {
                         node_id: child_id,
                         z_index,
@@ -848,5 +863,57 @@ mod auto_hoist_order_tests {
                 .any(|id| *id == later),
             "the positioned child is painted from the collection, not twice"
         );
+    }
+
+    /// Nothing inside a `display: none` subtree is painted, positioned
+    /// descendants included: they must not be hoisted into an ancestor's
+    /// collection or stacking context (where their stale layout from when the
+    /// subtree was displayed would be painted).
+    #[test]
+    fn positioned_descendants_of_display_none_are_not_hoisted() {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let root_id = doc.root_node().id;
+        let mut mutator = doc.mutate();
+        let html = mutator.create_element(qual_name!("html"), vec![]);
+        let body = mutator.create_element(
+            qual_name!("body"),
+            vec![style("display:block;margin:0;position:relative;z-index:0")],
+        );
+        let hidden = mutator.create_element(qual_name!("div"), vec![style("display:none")]);
+        let auto = mutator.create_element(
+            qual_name!("div"),
+            vec![style(
+                "display:block;position:absolute;width:50px;height:50px",
+            )],
+        );
+        let raised = mutator.create_element(
+            qual_name!("div"),
+            vec![style(
+                "display:block;position:absolute;z-index:2;width:50px;height:50px",
+            )],
+        );
+        mutator.append_children(hidden, &[auto, raised]);
+        mutator.append_children(body, &[hidden]);
+        mutator.append_children(html, &[body]);
+        mutator.append_children(root_id, &[html]);
+        drop(mutator);
+        doc.resolve(0.0);
+
+        let hoisted: Vec<NodeId> = doc.nodes[body]
+            .auto_hoisted
+            .iter()
+            .flat_map(|list| list.iter().map(|child| child.node_id))
+            .chain(
+                doc.nodes[body]
+                    .stacking_context
+                    .iter()
+                    .flat_map(|context| context.children.iter().map(|child| child.node_id)),
+            )
+            .collect();
+        assert!(!hoisted.contains(&auto), "{hoisted:?}");
+        assert!(!hoisted.contains(&raised), "{hoisted:?}");
     }
 }
