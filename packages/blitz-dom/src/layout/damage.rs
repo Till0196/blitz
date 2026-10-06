@@ -744,6 +744,11 @@ impl BaseDocument {
             parent_stacking_context
                 .children
                 .extend(stacking_context.children.iter().cloned());
+            // Not (or no longer) a stacking context root: drop the list kept
+            // from when it was one (e.g. it had `opacity: 0` while fading in).
+            // Its entries now belong to the root above, and painting the stale
+            // list as well would paint them twice, at stale offsets.
+            self.nodes[node_id].stacking_context = None;
         } else {
             stacking_context.sort();
             stacking_context.compute_content_size(self);
@@ -915,5 +920,54 @@ mod auto_hoist_order_tests {
             .collect();
         assert!(!hoisted.contains(&auto), "{hoisted:?}");
         assert!(!hoisted.contains(&raised), "{hoisted:?}");
+    }
+
+    /// A box that stops being a stacking context root (its opacity goes back
+    /// to 1) must not keep the list of hoisted children it collected while it
+    /// was one: those children are now hoisted to the root above, and the
+    /// stale list would paint them a second time.
+    #[test]
+    fn a_box_that_stops_being_a_stacking_context_drops_its_list() {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let root_id = doc.root_node().id;
+        let mut mutator = doc.mutate();
+        let html = mutator.create_element(qual_name!("html"), vec![]);
+        let body = mutator.create_element(
+            qual_name!("body"),
+            vec![style("display:block;margin:0;position:relative;z-index:0")],
+        );
+        let fading = mutator.create_element(
+            qual_name!("div"),
+            vec![style("display:block;position:absolute;opacity:0.5")],
+        );
+        let raised = mutator.create_element(
+            qual_name!("div"),
+            vec![style(
+                "display:block;position:absolute;z-index:2;width:50px;height:50px",
+            )],
+        );
+        mutator.append_children(fading, &[raised]);
+        mutator.append_children(body, &[fading]);
+        mutator.append_children(html, &[body]);
+        mutator.append_children(root_id, &[html]);
+        drop(mutator);
+        doc.resolve(0.0);
+        assert!(doc.nodes[fading].stacking_context.is_some());
+
+        doc.mutate().set_style_property(fading, "opacity", "1");
+        doc.resolve(0.0);
+        assert!(
+            doc.nodes[fading].stacking_context.is_none(),
+            "the list from when it was a root is dropped"
+        );
+        let in_body: Vec<NodeId> = doc.nodes[body]
+            .stacking_context
+            .iter()
+            .flat_map(|context| context.children.iter().map(|child| child.node_id))
+            .collect();
+        assert_eq!(in_body, vec![raised]);
     }
 }
