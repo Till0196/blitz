@@ -447,12 +447,21 @@ impl BaseDocument {
                     .intersects(Contain::PAINT | Contain::LAYOUT)
         }
 
+        /// Where a node is on the page: rounded (`final_layout`) and
+        /// unrounded (`unrounded_layout`), accumulated down the tree.
+        #[derive(Clone, Copy)]
+        struct Origin {
+            rounded: (f32, f32),
+            unrounded: (f32, f32),
+        }
+
         fn walk(
             doc: &mut BaseDocument,
             node_id: NodeId,
-            parent_origin: (f32, f32),
+            parent_origin: Origin,
             block: Block,
             fixed_block: Block,
+            reround: bool,
         ) {
             let Some(node) = doc.nodes.get(node_id) else {
                 return;
@@ -481,7 +490,11 @@ impl BaseDocument {
                 _ => None,
             };
             if let Some(block) = block_of_box {
-                let layout = *node.final_layout();
+                // Placed in unrounded coordinates, and the rounded position
+                // derived from that (as Taffy rounds: the rounded page
+                // position less the parent's), so that placing it again on
+                // the next pass gives the same result.
+                let layout = *node.unrounded_layout();
                 let style = node.layout_style();
                 let inset = style.inset();
                 let calc = crate::layout::resolve_calc_value;
@@ -492,8 +505,8 @@ impl BaseDocument {
                 drop(style);
                 let margin = layout.margin;
                 // Where the box is now, on the page.
-                let now_x = parent_origin.0 + layout.location.x;
-                let now_y = parent_origin.1 + layout.location.y;
+                let now_x = parent_origin.unrounded.0 + layout.location.x;
+                let now_y = parent_origin.unrounded.1 + layout.location.y;
                 // Where its insets put it, against the containing block. With
                 // neither inset it stays at its static position.
                 let x = match (left, right) {
@@ -510,29 +523,45 @@ impl BaseDocument {
                     }
                     (None, None) => now_y,
                 };
-                let node = &mut doc.nodes[node_id];
-                let moved = node.final_layout_mut();
-                moved.location.x += x - now_x;
-                moved.location.y += y - now_y;
-                let moved = node.unrounded_layout_mut();
-                moved.location.x += x - now_x;
-                moved.location.y += y - now_y;
+                let placed = doc.nodes[node_id].unrounded_layout_mut();
+                placed.location.x = x - parent_origin.unrounded.0;
+                placed.location.y = y - parent_origin.unrounded.1;
+            }
+            // A placed box, and everything in it, is rounded again from where
+            // it now is: its descendants were rounded at its old position.
+            let reround = reround || block_of_box.is_some();
+            if reround {
+                let unrounded = *doc.nodes[node_id].unrounded_layout();
+                let x = parent_origin.unrounded.0 + unrounded.location.x;
+                let y = parent_origin.unrounded.1 + unrounded.location.y;
+                let rounded = doc.nodes[node_id].final_layout_mut();
+                rounded.location.x = x.round() - parent_origin.rounded.0;
+                rounded.location.y = y.round() - parent_origin.rounded.1;
+                rounded.size.width = (x + unrounded.size.width).round() - x.round();
+                rounded.size.height = (y + unrounded.size.height).round() - y.round();
             }
 
             let node = &doc.nodes[node_id];
             let layout = *node.final_layout();
-            let origin = (
-                parent_origin.0 + layout.location.x,
-                parent_origin.1 + layout.location.y,
-            );
+            let unrounded = *node.unrounded_layout();
+            let origin = Origin {
+                rounded: (
+                    parent_origin.rounded.0 + layout.location.x,
+                    parent_origin.rounded.1 + layout.location.y,
+                ),
+                unrounded: (
+                    parent_origin.unrounded.0 + unrounded.location.x,
+                    parent_origin.unrounded.1 + unrounded.location.y,
+                ),
+            };
             let establishes_fixed = node
                 .primary_styles()
                 .is_some_and(|style| contains_fixed(&style));
             let padding_box = Block {
-                x: origin.0 + layout.border.left,
-                y: origin.1 + layout.border.top,
-                width: layout.size.width - layout.border.left - layout.border.right,
-                height: layout.size.height - layout.border.top - layout.border.bottom,
+                x: origin.unrounded.0 + unrounded.border.left,
+                y: origin.unrounded.1 + unrounded.border.top,
+                width: unrounded.size.width - unrounded.border.left - unrounded.border.right,
+                height: unrounded.size.height - unrounded.border.top - unrounded.border.bottom,
             };
             let block = if position != Position::Static || establishes_fixed {
                 padding_box
@@ -551,12 +580,12 @@ impl BaseDocument {
                 .map(|c| c.to_vec())
                 .unwrap_or_default();
             for child in children {
-                walk(doc, child, origin, block, fixed_block);
+                walk(doc, child, origin, block, fixed_block, reround);
             }
         }
 
         let root = self.root_element().id;
-        let layout = *self.nodes[root].final_layout();
+        let layout = *self.nodes[root].unrounded_layout();
         let block = Block {
             x: layout.location.x,
             y: layout.location.y,
@@ -571,7 +600,11 @@ impl BaseDocument {
             width: viewport.width.to_f32_px(),
             height: viewport.height.to_f32_px(),
         };
-        walk(self, root, (0.0, 0.0), block, fixed_block);
+        let origin = Origin {
+            rounded: (0.0, 0.0),
+            unrounded: (0.0, 0.0),
+        };
+        walk(self, root, origin, block, fixed_block, false);
     }
 }
 
@@ -638,5 +671,60 @@ mod fixed_position_tests {
             fixed_in("position:absolute;transform:translate(0px, 0px)"),
             (320.0 + 290.0, 130.0 + 130.0)
         );
+    }
+
+    /// Placing a box against a containing block that is not its parent, at a
+    /// fractional scale, gives the same position on every layout pass (the
+    /// box used to alternate between two rounded positions).
+    #[test]
+    fn placed_boxes_stay_put_across_layout_passes() {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(1162, 653, 0.6052, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let root_id = doc.root_node().id;
+        let mut mutator = doc.mutate();
+        let html = mutator.create_element(qual_name!("html"), vec![]);
+        let body = mutator.create_element(
+            qual_name!("body"),
+            vec![style(
+                "margin:0;position:relative;width:1920px;height:1079.3px",
+            )],
+        );
+        let column = mutator.create_element(
+            qual_name!("div"),
+            vec![style("position:static;height:0;margin-top:1079.3px")],
+        );
+        let panel = mutator.create_element(
+            qual_name!("div"),
+            vec![style(
+                "position:absolute;left:669px;bottom:40.7px;width:1199px;height:309.7px",
+            )],
+        );
+        let inner = mutator.create_element(
+            qual_name!("div"),
+            vec![style("position:relative;top:10.3px;height:100px")],
+        );
+        mutator.append_children(panel, &[inner]);
+        mutator.append_children(column, &[panel]);
+        mutator.append_children(body, &[column]);
+        mutator.append_children(html, &[body]);
+        mutator.append_children(root_id, &[html]);
+        drop(mutator);
+        doc.resolve(0.0);
+        let first = (
+            doc.nodes[panel].final_layout().location,
+            doc.nodes[inner].final_layout().location,
+        );
+        for _ in 0..5 {
+            doc.resolve(0.0);
+            assert_eq!(
+                (
+                    doc.nodes[panel].final_layout().location,
+                    doc.nodes[inner].final_layout().location,
+                ),
+                first
+            );
+        }
     }
 }
