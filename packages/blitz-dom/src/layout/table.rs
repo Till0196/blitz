@@ -31,6 +31,26 @@ pub struct TableTreeWrapper<'doc> {
     pub(crate) ctx: Arc<TableContext>,
 }
 
+/// The share of a table cell's free height that goes above its content:
+/// `vertical-align: middle` centres the content in the cell and `bottom`
+/// aligns it to the bottom (CSS 2.1 §17.5.4). `None` keeps it at the top
+/// (`top`, and `baseline` which is approximated by `top`).
+pub(crate) fn cell_content_alignment(node: &crate::Node) -> Option<f32> {
+    use style::values::computed::AlignmentBaseline;
+    use style::values::generics::box_::{BaselineShiftKeyword, GenericBaselineShift};
+    let style = node.primary_styles()?;
+    if style.clone_display().inside() != DisplayInside::TableCell {
+        return None;
+    }
+    let boxed = style.get_box();
+    match (&boxed.baseline_shift, boxed.alignment_baseline) {
+        (GenericBaselineShift::Keyword(BaselineShiftKeyword::Bottom), _) => Some(1.0),
+        (GenericBaselineShift::Keyword(BaselineShiftKeyword::Center), _)
+        | (_, AlignmentBaseline::Middle) => Some(0.5),
+        _ => None,
+    }
+}
+
 // Deliberately not `Clone`: `style` may hold raw pointers into `calc_values`.
 #[derive(Debug)]
 pub struct TableContext {
@@ -1157,5 +1177,143 @@ mod anonymous_cell_tests {
         let still = doc.nodes[ids.0].final_layout();
         assert_eq!((still.location.x, still.location.y), (0.0, 0.0));
         assert_eq!(doc.nodes[ids.1].final_layout().location.x, 20.0);
+    }
+}
+
+#[cfg(test)]
+mod cell_vertical_align_tests {
+    use crate::{Attribute, BaseDocument, DocumentConfig, NodeId, qual_name};
+    use blitz_traits::shell::{ColorScheme, Viewport};
+
+    fn style(value: &str) -> Attribute {
+        Attribute {
+            name: qual_name!("style"),
+            value: value.to_string(),
+        }
+    }
+
+    /// A table with one cell `height:80px` styled with `cell_style`, holding
+    /// either a 20px-tall block or a line of 20px-tall text.
+    fn layout(cell_style: &str, block_child: bool) -> (BaseDocument, NodeId, NodeId) {
+        layout_in(cell_style, block_child, "display:table")
+    }
+
+    fn layout_in(
+        cell_style: &str,
+        block_child: bool,
+        container_style: &str,
+    ) -> (BaseDocument, NodeId, NodeId) {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(800, 600, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let root_id = doc.root_node().id;
+        let mut m = doc.mutate();
+        let html = m.create_element(qual_name!("html"), vec![]);
+        let body = m.create_element(qual_name!("body"), vec![style("margin:0")]);
+        let table = m.create_element(qual_name!("div"), vec![style(container_style)]);
+        let cell = m.create_element(
+            qual_name!("div"),
+            vec![style(&format!(
+                "display:table-cell;width:200px;height:80px;font-size:16px;line-height:20px;{cell_style}"
+            ))],
+        );
+        let content = if block_child {
+            m.create_element(
+                qual_name!("div"),
+                vec![style("display:block;width:50px;height:20px")],
+            )
+        } else {
+            m.create_text_node("text")
+        };
+        m.append_children(cell, &[content]);
+        m.append_children(table, &[cell]);
+        m.append_children(body, &[table]);
+        m.append_children(html, &[body]);
+        m.append_children(root_id, &[html]);
+        drop(m);
+        doc.resolve(0.0);
+        (doc, cell, content)
+    }
+
+    #[test]
+    fn middle_centres_inline_content_in_the_cell() {
+        let (doc, cell, _) = layout("vertical-align:middle", false);
+        let layout = doc.nodes[cell].final_layout();
+        assert_eq!(layout.size.height, 80.0);
+        assert_eq!(layout.padding.top, 30.0);
+        assert_eq!(layout.padding.top + layout.padding.bottom, 0.0);
+    }
+
+    #[test]
+    fn middle_centres_block_content_in_the_cell() {
+        let (doc, cell, child) = layout("vertical-align:middle", true);
+        assert_eq!(doc.nodes[cell].final_layout().size.height, 80.0);
+        assert_eq!(doc.nodes[child].final_layout().location.y, 30.0);
+    }
+
+    /// A cell outside of a table is wrapped in an anonymous table of its own
+    /// size, so its content is aligned in the same way.
+    #[test]
+    fn middle_centres_content_of_a_cell_outside_a_table() {
+        let (doc, cell, _) = layout_in("vertical-align:middle", false, "display:block");
+        let layout = doc.nodes[cell].final_layout();
+        assert_eq!(layout.size.height, 80.0);
+        assert_eq!(layout.padding.top, 30.0);
+
+        let (doc, _, child) = layout_in("vertical-align:middle", true, "display:block");
+        assert_eq!(doc.nodes[child].final_layout().location.y, 30.0);
+    }
+
+    #[test]
+    fn bottom_aligns_content_to_the_bottom_of_the_cell() {
+        let (doc, _, child) = layout("vertical-align:bottom", true);
+        assert_eq!(doc.nodes[child].final_layout().location.y, 60.0);
+    }
+
+    #[test]
+    fn top_keeps_content_at_the_top_of_the_cell() {
+        let (doc, cell, child) = layout("vertical-align:top", true);
+        assert_eq!(doc.nodes[child].final_layout().location.y, 0.0);
+        assert_eq!(doc.nodes[cell].final_layout().padding.top, 0.0);
+    }
+
+    /// The `height` of a table is a minimum: it grows to fit its rows
+    /// (CSS 2.1 §17.5.3), and keeps that height when the rows are shorter.
+    #[test]
+    fn table_height_is_a_minimum() {
+        let (doc, cell, _) = layout_in(
+            "height:auto;vertical-align:top",
+            true,
+            "display:table;height:10px",
+        );
+        let table = doc.nodes[cell].parent.unwrap();
+        assert_eq!(doc.nodes[table].final_layout().size.height, 20.0);
+
+        let (doc, cell, _) = layout_in(
+            "height:auto;vertical-align:top",
+            true,
+            "display:table;height:100px",
+        );
+        let table = doc.nodes[cell].parent.unwrap();
+        assert_eq!(doc.nodes[table].final_layout().size.height, 100.0);
+    }
+
+    /// Laying the table out again while the cell's layout comes from the
+    /// cache must not move the content any further.
+    #[test]
+    fn relayout_does_not_move_the_content_twice() {
+        let (mut doc, cell, child) = layout("vertical-align:middle", true);
+        let table = doc.nodes[cell].parent.unwrap();
+        for padding in ["1px", "2px"] {
+            doc.mutate().set_attribute(
+                table,
+                qual_name!("style"),
+                &format!("display:table;padding-top:{padding}"),
+            );
+            doc.resolve(0.0);
+        }
+        assert_eq!(doc.nodes[cell].final_layout().location.y, 2.0);
+        assert_eq!(doc.nodes[child].final_layout().location.y, 30.0);
     }
 }

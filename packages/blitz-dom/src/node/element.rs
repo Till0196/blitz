@@ -128,6 +128,8 @@ pub struct LayoutData {
     pub final_layout: Layout,
     pub scroll_offset: crate::Point<f64>,
     pub scrollable_overflow: KurboRect,
+    /// How far a table cell's content is moved down by `vertical-align`.
+    pub cell_content_offset: f32,
 }
 
 impl LayoutData {
@@ -138,6 +140,7 @@ impl LayoutData {
             final_layout: Layout::new(),
             scroll_offset: crate::Point::ZERO,
             scrollable_overflow: KurboRect::ZERO,
+            cell_content_offset: 0.0,
         }
     }
 }
