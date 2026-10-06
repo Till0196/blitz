@@ -1127,4 +1127,35 @@ mod anonymous_cell_tests {
         assert!(anonymous.location.x >= cell.location.x + cell.size.width);
         assert_eq!(doc.nodes[ids.1].final_layout().size.width, 80.0);
     }
+
+    /// CSS Positioned Layout §3.1: the inset properties apply only to
+    /// positioned boxes. A static box ignores `left`; a relative one is moved.
+    #[test]
+    fn insets_move_positioned_boxes_only() {
+        let mut ids = (NodeId::default(), NodeId::default());
+        let doc = resolve(|m| {
+            let container = m.create_element(
+                qual_name!("div"),
+                vec![style("display:block;position:relative;width:300px")],
+            );
+            let fixed_in_place = m.create_element(
+                qual_name!("div"),
+                vec![style(
+                    "display:block;width:50px;height:10px;left:-190px;top:30px",
+                )],
+            );
+            let moved = m.create_element(
+                qual_name!("div"),
+                vec![style(
+                    "display:block;position:relative;width:50px;height:10px;left:20px",
+                )],
+            );
+            m.append_children(container, &[fixed_in_place, moved]);
+            ids = (fixed_in_place, moved);
+            vec![container]
+        });
+        let still = doc.nodes[ids.0].final_layout();
+        assert_eq!((still.location.x, still.location.y), (0.0, 0.0));
+        assert_eq!(doc.nodes[ids.1].final_layout().location.x, 20.0);
+    }
 }

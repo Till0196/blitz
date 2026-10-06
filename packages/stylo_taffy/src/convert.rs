@@ -8,6 +8,7 @@ pub(crate) mod stylo {
     pub(crate) use style::properties::generated::longhands::direction::computed_value::T as Direction;
     pub(crate) use style::properties::longhands::aspect_ratio::computed_value::T as AspectRatio;
     pub(crate) use style::properties::longhands::position::computed_value::T as Position;
+    pub(crate) use style::properties::style_structs::Position as PositionStyles;
     pub(crate) use style::values::computed::length_percentage::CalcLengthPercentage;
     pub(crate) use style::values::computed::length_percentage::Unpacked as UnpackedLengthPercentage;
     pub(crate) use style::values::computed::{
@@ -247,6 +248,31 @@ pub fn box_sizing(input: stylo::BoxSizing) -> taffy::BoxSizing {
 }
 
 #[inline]
+/// The insets of a box. They apply only to positioned boxes (CSS Positioned
+/// Layout §3.1): a `position: static` box ignores `top`/`right`/`bottom`/
+/// `left`. Taffy has no static positioning (it lays a static box out as
+/// relatively positioned), so the insets of a static box are passed as `auto`
+/// rather than shifting the box.
+pub fn insets(
+    position: stylo::Position,
+    pos: &stylo::PositionStyles,
+) -> taffy::Rect<taffy::LengthPercentageAuto> {
+    if position == stylo::Position::Static {
+        return taffy::Rect {
+            left: taffy::LengthPercentageAuto::auto(),
+            right: taffy::LengthPercentageAuto::auto(),
+            top: taffy::LengthPercentageAuto::auto(),
+            bottom: taffy::LengthPercentageAuto::auto(),
+        };
+    }
+    taffy::Rect {
+        left: self::inset(&pos.left),
+        right: self::inset(&pos.right),
+        top: self::inset(&pos.top),
+        bottom: self::inset(&pos.bottom),
+    }
+}
+
 pub fn position(input: stylo::Position) -> taffy::Position {
     match input {
         // TODO: support position:static
@@ -750,12 +776,7 @@ pub fn to_taffy_style(style: &stylo::ComputedValues) -> taffy::Style<Atom> {
         },
         aspect_ratio: self::aspect_ratio(pos.aspect_ratio),
 
-        inset: taffy::Rect {
-            left: self::inset(&pos.left),
-            right: self::inset(&pos.right),
-            top: self::inset(&pos.top),
-            bottom: self::inset(&pos.bottom),
-        },
+        inset: self::insets(style.clone_position(), pos),
         margin: taffy::Rect {
             left: self::margin(&margin.margin_left),
             right: self::margin(&margin.margin_right),
