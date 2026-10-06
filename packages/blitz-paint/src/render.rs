@@ -309,10 +309,12 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             return;
         }
 
-        // Hide elements with a visibility style other than visible
-        if styles.get_inherited_box().visibility != StyloVisibility::Visible {
-            return;
-        }
+        // `visibility: hidden`/`collapse` (CSS Display §4) makes the element's own
+        // box invisible -- background, borders, shadows, replaced content, its own
+        // text -- but not its descendants: a descendant with `visibility: visible`
+        // is still painted. So keep going, painting only the parts that are not
+        // the element's own (children, and visible runs of its inline content).
+        let visible = styles.get_inherited_box().visibility == StyloVisibility::Visible;
 
         let effects = styles.get_effects();
         let opacity = effects.opacity;
@@ -440,8 +442,10 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         let mut clip_path_for_layer = clip_path_shape.unwrap_or(default_clip);
         clip_path_for_layer.apply_affine(Affine::scale(self.scale));
 
-        cx.draw_outline(scene);
-        cx.draw_outset_box_shadow(scene);
+        if visible {
+            cx.draw_outline(scene);
+            cx.draw_outset_box_shadow(scene);
+        }
 
         // clip-path clip ayer
         self.layer_manager.maybe_with_layer(
@@ -493,11 +497,13 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                     filter,
                     backdrop_filter,
                     |scene| {
-                        cx.draw_background(scene);
-                        cx.draw_inset_box_shadow(scene);
-                        cx.draw_table_row_backgrounds(scene);
-                        cx.draw_table_borders(scene);
-                        cx.draw_border(scene);
+                        if visible {
+                            cx.draw_background(scene);
+                            cx.draw_inset_box_shadow(scene);
+                            cx.draw_table_row_backgrounds(scene);
+                            cx.draw_table_borders(scene);
+                            cx.draw_border(scene);
+                        }
                         cx.stroke_devtools(scene);
 
                         // TODO: allow layers with opacity to be unclipped (overflow: visible)
@@ -527,16 +533,21 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                                     x: -node.scroll_offset().x * self.scale,
                                     y: -node.scroll_offset().y * self.scale,
                                 });
-                                cx.draw_image(scene);
-                                #[cfg(feature = "svg")]
-                                cx.draw_svg(scene);
-                                #[cfg(feature = "custom-widget")]
-                                cx.draw_custom_widget(scene);
-                                cx.draw_sub_document(scene);
-                                cx.draw_input(scene);
-                                cx.draw_text_input_text(scene, content_position);
+                                if visible {
+                                    cx.draw_image(scene);
+                                    #[cfg(feature = "svg")]
+                                    cx.draw_svg(scene);
+                                    #[cfg(feature = "custom-widget")]
+                                    cx.draw_custom_widget(scene);
+                                    cx.draw_sub_document(scene);
+                                    cx.draw_input(scene);
+                                    cx.draw_text_input_text(scene, content_position);
+                                }
+                                // Per run: visible descendants' text still paints.
                                 cx.draw_inline_layout(scene, content_position);
-                                cx.draw_marker(scene, content_position);
+                                if visible {
+                                    cx.draw_marker(scene, content_position);
+                                }
                                 cx.draw_children(scene, cx.transform, child_clip_rect);
                             },
                         );
@@ -544,7 +555,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                         // Overlay scrollbars, drawn unscrolled above the
                         // clipped content.
                         #[cfg(feature = "scrollbars")]
-                        {
+                        if visible {
                             cx.transform = unscrolled_transform;
                             cx.draw_scrollbars(scene);
                         }
@@ -994,8 +1005,8 @@ impl ElementCx<'_, '_> {
         for &id in chain.iter().rev() {
             let node = tree.get(id)?;
             let layout = node.final_layout();
-            let position = origin
-                + kurbo::Vec2::new(layout.location.x as f64, layout.location.y as f64);
+            let position =
+                origin + kurbo::Vec2::new(layout.location.x as f64, layout.location.y as f64);
             let clips = node.primary_styles().is_some_and(|style| {
                 !matches!(style.clone_overflow_x(), Overflow::Visible)
                     || !matches!(style.clone_overflow_y(), Overflow::Visible)
