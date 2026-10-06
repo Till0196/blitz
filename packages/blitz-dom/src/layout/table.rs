@@ -2,7 +2,7 @@ use blitz_traits::node_id::NodeId;
 use std::{ops::Range, sync::Arc};
 
 use atomic_refcell::AtomicRefCell;
-use markup5ever::local_name;
+use markup5ever::{QualName, local_name, ns};
 use style::properties::style_structs::Border;
 use style::servo_arc::Arc as ServoArc;
 use style::values::computed::length_percentage::{
@@ -14,14 +14,16 @@ use style::{
     Atom, computed_values::border_collapse::T as BorderCollapse,
     computed_values::table_layout::T as TableLayout, values::computed::BorderStyle,
 };
+use style::{data::ElementData as StyloElementData, shared_lock::StylesheetGuards};
 use style_traits::values::specified::AllowedNumericType;
 use taffy::{
     DetailedGridInfo, LayoutPartialTree as _, ResolveOrZero, TrackSizingFunction, style_helpers,
 };
 
-use crate::BaseDocument;
+use crate::node::NodeFlags;
+use crate::{BaseDocument, ElementData, NodeData};
 
-use super::damage::{CONSTRUCT_BOX, CONSTRUCT_DESCENDENT, CONSTRUCT_FC};
+use super::damage::{ALL_DAMAGE, CONSTRUCT_BOX, CONSTRUCT_DESCENDENT, CONSTRUCT_FC};
 use super::resolve_calc_value;
 
 pub struct TableTreeWrapper<'doc> {
@@ -100,6 +102,25 @@ impl ColumnCursor {
     }
 }
 
+/// Anonymous table cells generated while walking a table's children.
+///
+/// CSS 2.1 §17.2.1: a child of a table, row group or row that is not a
+/// proper table child (a block, an inline, a non-whitespace text run, ...)
+/// is wrapped in an anonymous table cell, and consecutive such children
+/// share one cell. A cell generated outside of a row also gets an
+/// anonymous row.
+#[derive(Debug, Default)]
+struct AnonymousCells {
+    /// The cell consecutive wrapped children are currently being added to
+    open: Option<NodeId>,
+    /// Whether the children being walked are those of a table row (so a
+    /// new anonymous cell joins the current row rather than starting one)
+    in_row: bool,
+    /// Every anonymous cell created, so the table can free them when it
+    /// is next constructed
+    created: Vec<NodeId>,
+}
+
 #[derive(Debug, Clone)]
 pub struct TableColumn {
     pub node_id: NodeId,
@@ -156,10 +177,13 @@ fn percent_plus_length(
     dim.into()
 }
 
+/// Builds the table's layout context. Returns the context, the table's layout
+/// children (its cells), and the anonymous cells generated for children that
+/// are not proper table children (which the caller owns and must free).
 pub(crate) fn build_table_context(
     doc: &mut BaseDocument,
     table_root_node_id: NodeId,
-) -> (TableContext, Vec<NodeId>) {
+) -> (TableContext, Vec<NodeId>, Vec<NodeId>) {
     let mut cells: Vec<TableCell> = Vec::new();
     let mut rows: Vec<TableRow> = Vec::new();
     let mut row = 0u16;
@@ -212,6 +236,7 @@ pub(crate) fn build_table_context(
     // Percentage widths set on first-row cells: (column index, percentage, padding + border)
     let mut percent_columns: Vec<(u16, f32, f32)> = Vec::new();
     let mut calc_values: Vec<LengthPercentage> = Vec::new();
+    let mut anonymous = AnonymousCells::default();
     // Header row groups are laid out before other rows, and footer row groups after
     let row_group_order = |doc: &BaseDocument, child_id: NodeId| -> u8 {
         let display = doc.nodes[child_id]
@@ -230,6 +255,7 @@ pub(crate) fn build_table_context(
             }
             collect_table_cells(
                 doc,
+                table_root_node_id,
                 child_id,
                 is_fixed,
                 border_collapse,
@@ -240,8 +266,12 @@ pub(crate) fn build_table_context(
                 &mut column_sizes,
                 &mut first_cell_border,
                 &mut percent_columns,
+                &mut anonymous,
             );
         }
+        // Header, body and footer groups are separated: wrapped children in
+        // different groups never share a cell.
+        anonymous.open = None;
     }
     let remaining_column = if is_fixed {
         style_helpers::minmax(style_helpers::length(0.0), style_helpers::fr(1.0))
@@ -360,6 +390,7 @@ pub(crate) fn build_table_context(
             calc_values,
         },
         layout_children,
+        anonymous.created,
     )
 }
 
@@ -434,6 +465,7 @@ fn collect_columns(
 #[allow(clippy::too_many_arguments)]
 fn collect_table_cells(
     doc: &mut BaseDocument,
+    table_root_node_id: NodeId,
     node_id: NodeId,
     is_fixed: bool,
     border_collapse: BorderCollapse,
@@ -444,7 +476,24 @@ fn collect_table_cells(
     columns: &mut Vec<TrackSizingFunction>,
     first_cell_border: &mut Option<ServoArc<Border>>,
     percent_columns: &mut Vec<(u16, f32, f32)>,
+    anonymous: &mut AnonymousCells,
 ) {
+    if needs_anonymous_cell(doc, node_id) {
+        wrap_in_anonymous_cell(
+            doc,
+            table_root_node_id,
+            node_id,
+            is_fixed,
+            border_collapse,
+            row,
+            cursor,
+            cells,
+            rows,
+            anonymous,
+        );
+        return;
+    }
+
     let node = &mut doc.nodes[node_id];
 
     if !node.is_element() {
@@ -467,12 +516,21 @@ fn collect_table_cells(
         | DisplayInside::TableHeaderGroup
         | DisplayInside::TableFooterGroup
         | DisplayInside::Contents => {
+            // A row group is a proper table child: it ends the run of wrapped
+            // siblings before it, and wrapped children inside it get rows of
+            // their own. `display: contents` is transparent, so its children
+            // continue the surrounding run.
+            let is_group = display.inside() != DisplayInside::Contents;
+            if is_group {
+                anonymous.open = None;
+            }
             let children = std::mem::take(&mut doc.nodes[node_id].children);
             for child_id in children.iter().copied() {
                 doc.nodes[child_id]
                     .remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
                 collect_table_cells(
                     doc,
+                    table_root_node_id,
                     child_id,
                     is_fixed,
                     border_collapse,
@@ -483,12 +541,17 @@ fn collect_table_cells(
                     columns,
                     first_cell_border,
                     percent_columns,
+                    anonymous,
                 );
             }
             doc.nodes[node_id].children = children;
+            if is_group {
+                anonymous.open = None;
+            }
         }
         DisplayInside::TableRow => {
             node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
+            anonymous.open = None;
             *row += 1;
             cursor.start_row();
 
@@ -499,9 +562,11 @@ fn collect_table_cells(
             });
 
             let children = std::mem::take(&mut doc.nodes[node_id].children);
+            let was_in_row = std::mem::replace(&mut anonymous.in_row, true);
             for child_id in children.iter().copied() {
                 collect_table_cells(
                     doc,
+                    table_root_node_id,
                     child_id,
                     is_fixed,
                     border_collapse,
@@ -512,12 +577,16 @@ fn collect_table_cells(
                     columns,
                     first_cell_border,
                     percent_columns,
+                    anonymous,
                 );
             }
+            anonymous.in_row = was_in_row;
+            anonymous.open = None;
             doc.nodes[node_id].children = children;
         }
         DisplayInside::TableCell => {
             // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
+            anonymous.open = None;
             // A cell that is a direct child of the table (or of a row group)
             // gets an anonymous row (CSS 2.1 §17.2.1). Without one the cell
             // would be placed on grid line 0 and its width never recorded as
@@ -662,10 +731,16 @@ fn collect_table_cells(
                 };
                 cells.push(TableCell { node_id, style });
             }
-            // Otherwise probably a table caption: ignore
+            // Otherwise a table caption (in-flow children that are not
+            // proper table children were wrapped in an anonymous cell above):
+            // it ends the run of wrapped siblings, and is laid out elsewhere.
+            else {
+                anonymous.open = None;
+            }
         }
         DisplayInside::TableColumnGroup | DisplayInside::TableColumn | DisplayInside::Table => {
             node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
+            anonymous.open = None;
             //Ignore
         }
         DisplayInside::None => {
@@ -673,6 +748,162 @@ fn collect_table_cells(
             // Ignore
         }
     }
+}
+
+/// Whether a child of a table, row group or row is not a proper table child
+/// and so must be wrapped in an anonymous table cell (CSS 2.1 §17.2.1): an
+/// in-flow box that is not table-internal and not a caption, or a text run
+/// that is not just white space.
+fn needs_anonymous_cell(doc: &BaseDocument, node_id: NodeId) -> bool {
+    let node = &doc.nodes[node_id];
+    if !node.is_element() {
+        return node.is_text_node() && !node.is_whitespace_node();
+    }
+    let Some(styles) = node.primary_styles() else {
+        return false;
+    };
+    let display = styles.clone_display();
+    if matches!(
+        display.outside(),
+        DisplayOutside::None | DisplayOutside::TableCaption
+    ) {
+        return false;
+    }
+    if matches!(
+        styles.get_box().position,
+        style::computed_values::position::T::Absolute | style::computed_values::position::T::Fixed
+    ) {
+        return false;
+    }
+    matches!(
+        display.inside(),
+        DisplayInside::Flow | DisplayInside::FlowRoot | DisplayInside::Flex | DisplayInside::Grid
+    )
+}
+
+/// Put `node_id` in the anonymous cell its preceding wrapped siblings went
+/// into, or in a new one (in a new anonymous row, unless the children being
+/// walked are those of a row).
+#[allow(clippy::too_many_arguments)]
+fn wrap_in_anonymous_cell(
+    doc: &mut BaseDocument,
+    table_root_node_id: NodeId,
+    node_id: NodeId,
+    is_fixed: bool,
+    border_collapse: BorderCollapse,
+    row: &mut u16,
+    cursor: &mut ColumnCursor,
+    cells: &mut Vec<TableCell>,
+    rows: &mut Vec<TableRow>,
+    anonymous: &mut AnonymousCells,
+) {
+    // The wrapped child keeps its construction damage: it is laid out (and
+    // its own layout children constructed) as a child of the anonymous cell.
+    if let Some(cell_id) = anonymous.open {
+        doc.nodes[cell_id].children.push(node_id);
+        return;
+    }
+
+    // The cell inherits from the box it is generated in (the table, row
+    // group or row that is the wrapped child's parent).
+    let parent_id = doc.nodes[node_id].parent.unwrap_or(table_root_node_id);
+    let cell_id = create_anonymous_cell(doc, parent_id, table_root_node_id);
+    doc.nodes[cell_id].children.push(node_id);
+
+    if !anonymous.in_row {
+        *row += 1;
+        cursor.start_row();
+        rows.push(TableRow {
+            node_id: cell_id,
+            height: 0.0,
+            anonymous: true,
+        });
+    }
+
+    let Some(stylo_style) = doc.nodes[cell_id].primary_styles() else {
+        return;
+    };
+    let mut style = stylo_taffy::to_taffy_style(&stylo_style);
+    drop(stylo_style);
+    style.display = taffy::Display::Block;
+    if is_fixed {
+        style.min_size.width = style_helpers::length(0.0);
+    }
+    if border_collapse == BorderCollapse::Collapse {
+        style.border = taffy::Rect::ZERO.map(style_helpers::length);
+    }
+    style.margin = taffy::Rect::ZERO.map(style_helpers::length);
+    style.grid_column = taffy::Line {
+        start: style_helpers::auto(),
+        end: style_helpers::span(1),
+    };
+    style.grid_row = taffy::Line {
+        start: style_helpers::line(*row as i16),
+        end: style_helpers::span(1),
+    };
+    style.size.width = style_helpers::auto();
+    cursor.next_free();
+    cursor.place(1, 1);
+    cells.push(TableCell {
+        node_id: cell_id,
+        style,
+    });
+
+    anonymous.open = Some(cell_id);
+    anonymous.created.push(cell_id);
+}
+
+/// Create the box of an anonymous table cell: an anonymous block (laid out
+/// as a flow container of the children wrapped into it) styled as an
+/// anonymous box inheriting from `parent_id`, and laid out by the table.
+fn create_anonymous_cell(
+    doc: &mut BaseDocument,
+    parent_id: NodeId,
+    table_root_node_id: NodeId,
+) -> NodeId {
+    use style::selector_parser::PseudoElement;
+
+    const NAME: QualName = QualName {
+        prefix: None,
+        ns: ns!(html),
+        local: local_name!("div"),
+    };
+    let node_id = doc.create_node(NodeData::AnonymousBlock(Box::new(ElementData::new(
+        NAME,
+        Vec::new(),
+    ))));
+
+    let parent_style = doc.nodes[parent_id].primary_styles().unwrap();
+    let read_guard = doc.guard.read();
+    let guards = StylesheetGuards::same(&read_guard);
+    let style = doc.stylist.style_for_anonymous::<&crate::Node>(
+        &guards,
+        &PseudoElement::ServoAnonymousBox,
+        &parent_style,
+    );
+    drop(parent_style);
+    drop(read_guard);
+    let mut stylo_element_data = StyloElementData {
+        damage: ALL_DAMAGE,
+        ..Default::default()
+    };
+    stylo_element_data.styles.primary = Some(style);
+    stylo_element_data.set_restyled();
+    *doc.nodes[node_id]
+        .stylo_element_data_mut()
+        .ensure_init_mut() = stylo_element_data;
+
+    if doc.nodes[parent_id]
+        .flags
+        .contains(NodeFlags::IS_IN_DOCUMENT)
+    {
+        doc.nodes[node_id].flags.insert(NodeFlags::IS_IN_DOCUMENT);
+    }
+    doc.nodes[node_id].parent = Some(parent_id);
+    doc.nodes[node_id]
+        .layout_parent
+        .set(Some(table_root_node_id));
+    node_id
 }
 
 pub struct RangeIter(Range<usize>);
@@ -765,5 +996,135 @@ impl taffy::LayoutGridContainer for TableTreeWrapper<'_> {
         detailed_grid_info: DetailedGridInfo<Atom>,
     ) {
         *self.ctx.computed_grid_info.borrow_mut() = Some(detailed_grid_info);
+    }
+}
+
+#[cfg(test)]
+mod anonymous_cell_tests {
+    use crate::{Attribute, BaseDocument, DocumentConfig, NodeId, qual_name};
+    use blitz_traits::shell::{ColorScheme, Viewport};
+
+    /// Builds `<html><body>` with the elements `build` returns as the body's
+    /// children, resolves layout, and returns the document. There is no UA
+    /// stylesheet here, so every `display` is set explicitly.
+    fn resolve(build: impl FnOnce(&mut crate::DocumentMutator) -> Vec<NodeId>) -> BaseDocument {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(800, 600, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let root_id = doc.root_node().id;
+        let mut mutator = doc.mutate();
+        let html = mutator.create_element(qual_name!("html"), vec![]);
+        let body = mutator.create_element(qual_name!("body"), vec![style("margin:0")]);
+        let top = build(&mut mutator);
+        mutator.append_children(body, &top);
+        mutator.append_children(html, &[body]);
+        mutator.append_children(root_id, &[html]);
+        drop(mutator);
+        doc.resolve(0.0);
+        doc
+    }
+
+    fn style(value: &str) -> Attribute {
+        Attribute {
+            name: qual_name!("style"),
+            value: value.to_string(),
+        }
+    }
+
+    /// CSS 2.1 §17.2.1: block children of a table that are not table-internal
+    /// boxes are wrapped in an anonymous row and cell, and consecutive ones
+    /// share the cell, so they stack inside it and are laid out at their size.
+    #[test]
+    fn block_children_of_a_table_share_an_anonymous_cell() {
+        let mut items = (NodeId::default(), NodeId::default());
+        let doc = resolve(|m| {
+            let table =
+                m.create_element(qual_name!("div"), vec![style("display:table;width:300px")]);
+            let first = m.create_element(
+                qual_name!("div"),
+                vec![style("display:block;width:200px;height:50px")],
+            );
+            let second = m.create_element(
+                qual_name!("div"),
+                vec![style("display:block;width:200px;height:30px")],
+            );
+            m.append_children(table, &[first, second]);
+            items = (first, second);
+            vec![table]
+        });
+        let (first, second) = (
+            doc.nodes[items.0].final_layout(),
+            doc.nodes[items.1].final_layout(),
+        );
+        assert_eq!((first.size.width, first.size.height), (200.0, 50.0));
+        assert_eq!((second.size.width, second.size.height), (200.0, 30.0));
+        assert_eq!(second.location.y, first.location.y + 50.0);
+        // Both are laid out by the same (anonymous) cell
+        assert_eq!(
+            doc.nodes[items.0].layout_parent.get(),
+            doc.nodes[items.1].layout_parent.get()
+        );
+    }
+
+    /// The wrapped box is laid out like any other box, descendants included:
+    /// an absolutely positioned child with a definite width gets that width.
+    #[test]
+    fn descendants_of_a_wrapped_box_are_laid_out() {
+        let mut text = NodeId::default();
+        let doc = resolve(|m| {
+            let table =
+                m.create_element(qual_name!("div"), vec![style("display:table;width:300px")]);
+            let item = m.create_element(
+                qual_name!("div"),
+                vec![style(
+                    "display:block;position:relative;width:200px;height:40px",
+                )],
+            );
+            text = m.create_element(
+                qual_name!("div"),
+                vec![style(
+                    "display:block;position:absolute;left:10px;top:0;width:150px;height:20px",
+                )],
+            );
+            m.append_children(item, &[text]);
+            m.append_children(table, &[item]);
+            vec![table]
+        });
+        let layout = doc.nodes[text].final_layout();
+        assert_eq!((layout.size.width, layout.size.height), (150.0, 20.0));
+        assert_eq!(layout.location.x, 10.0);
+    }
+
+    /// A block child of a row is wrapped in an anonymous cell of that row: it
+    /// goes in the next column, beside the row's real cell, not in a new row.
+    #[test]
+    fn a_block_child_of_a_row_becomes_a_cell_of_that_row() {
+        let mut ids = (NodeId::default(), NodeId::default());
+        let doc = resolve(|m| {
+            let table = m.create_element(qual_name!("div"), vec![style("display:table")]);
+            let row = m.create_element(qual_name!("div"), vec![style("display:table-row")]);
+            let cell = m.create_element(
+                qual_name!("div"),
+                vec![style("display:table-cell;width:100px;height:40px")],
+            );
+            let block = m.create_element(
+                qual_name!("div"),
+                vec![style("display:block;width:80px;height:40px")],
+            );
+            m.append_children(row, &[cell, block]);
+            m.append_children(table, &[row]);
+            ids = (cell, block);
+            vec![table]
+        });
+        let cell = doc.nodes[ids.0].final_layout();
+        let anonymous_cell = doc.nodes[ids.1]
+            .layout_parent
+            .get()
+            .expect("the block is laid out by an anonymous cell");
+        let anonymous = doc.nodes[anonymous_cell].final_layout();
+        assert_eq!(anonymous.location.y, cell.location.y);
+        assert!(anonymous.location.x >= cell.location.x + cell.size.width);
+        assert_eq!(doc.nodes[ids.1].final_layout().size.width, 80.0);
     }
 }

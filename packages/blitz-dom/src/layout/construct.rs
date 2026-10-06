@@ -578,7 +578,9 @@ fn collect_layout_children_with_wrap(
         }
 
         DisplayInside::Table => {
-            let (table_context, tlayout_children) = build_table_context(doc, container_node_id);
+            let (table_context, tlayout_children, anonymous_cells) =
+                build_table_context(doc, container_node_id);
+            out.anonymous_blocks.extend(anonymous_cells);
             #[allow(clippy::arc_with_non_send_sync)]
             let data = SpecialElementData::TableRoot(Arc::new(table_context));
             doc.nodes[container_node_id]
