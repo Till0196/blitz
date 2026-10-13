@@ -764,6 +764,7 @@ impl LayoutPassState<'_> {
 
                         // Note: `pos` is content-box relative
                         let pos = block_ctx.place_floated_box(
+                            box_break_data.inline_box_id,
                             output.size + margin_sum,
                             min_y,
                             direction,
