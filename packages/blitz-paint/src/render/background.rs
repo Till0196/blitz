@@ -261,7 +261,9 @@ impl ElementCx<'_, '_> {
             .map(|row| {
                 [
                     row.group.and_then(background_color),
-                    background_color(row.node_id),
+                    (!row.anonymous)
+                        .then(|| background_color(row.node_id))
+                        .flatten(),
                 ]
             })
             .collect();

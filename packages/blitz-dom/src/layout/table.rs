@@ -132,6 +132,10 @@ pub struct TableRow {
     /// specified length `height`. Such rows do not receive excess table height when there
     /// are unconstrained rows to receive it instead.
     pub is_constrained: bool,
+    /// An anonymous row wrapping cells that are not inside a table row.
+    /// It has no element of its own: `node_id` is the first cell, and nothing
+    /// (no background) is painted for the row itself.
+    pub anonymous: bool,
 }
 
 /// The used width of one border side: border widths are not adjusted for
@@ -598,6 +602,7 @@ fn collect_table_cells(
                 group: None,
                 height,
                 is_constrained: height.is_some(),
+                anonymous: false,
             });
 
             let children = std::mem::take(&mut doc.nodes[node_id].children);
@@ -622,6 +627,21 @@ fn collect_table_cells(
         }
         DisplayInside::TableCell => {
             // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
+            // A cell that is a direct child of the table (or of a row group)
+            // gets an anonymous row (CSS 2.1 §17.2.1). Without one the cell
+            // would be placed on grid line 0 and its width never recorded as
+            // a column width, so every column came out `auto` and stretched.
+            if *row == 0 {
+                *row += 1;
+                cursor.start_row();
+                rows.push(TableRow {
+                    node_id,
+                    group: None,
+                    height: None,
+                    is_constrained: false,
+                    anonymous: true,
+                });
+            }
             let stylo_style = &node.primary_styles().unwrap();
             let colspan: u16 = node
                 .attr(local_name!("colspan"))
