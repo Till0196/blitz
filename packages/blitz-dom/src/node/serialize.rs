@@ -223,7 +223,8 @@ impl Node {
                     writer.push('\n');
                 }
 
-                let is_void = !opts.xml && data.name.ns == ns!(html) && is_void_element(&data.name.local);
+                let is_void =
+                    !opts.xml && data.name.ns == ns!(html) && is_void_element(&data.name.local);
                 if !self_closing && !is_void {
                     for &child_id in &self.children {
                         self.tree()[child_id].write_outer_html_in_style(writer, opts, nesting + 1);

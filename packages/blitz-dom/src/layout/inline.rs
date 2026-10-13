@@ -1317,7 +1317,10 @@ mod vertical_align_tests {
         assert_eq!(doc.nodes[short].final_layout().location.y, 0.0);
         let (doc, short, line_bottom) = make_doc("bottom");
         assert!(line_bottom >= 60.0);
-        assert_eq!(doc.nodes[short].final_layout().location.y, line_bottom - 20.0);
+        assert_eq!(
+            doc.nodes[short].final_layout().location.y,
+            line_bottom - 20.0
+        );
     }
 
     /// A box taller than the line's strut with `vertical-align: top` sits at the top of

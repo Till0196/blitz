@@ -287,7 +287,9 @@ impl BaseDocument {
             entries
         };
 
-        self.nodes[node_id].passes_positioned_through.set(passes_through);
+        self.nodes[node_id]
+            .passes_positioned_through
+            .set(passes_through);
         // A block container that does not pass its positioned boxes through
         // collects those of the static block containers below it.
         let collects = !passes_through && collects_positioned(&self.nodes[node_id]);
@@ -483,11 +485,16 @@ fn passes_positioned_through(node: &Node) -> bool {
     };
     let display = style.clone_display();
     display.outside() == DisplayOutside::Block
-        && matches!(display.inside(), DisplayInside::Flow | DisplayInside::FlowRoot)
+        && matches!(
+            display.inside(),
+            DisplayInside::Flow | DisplayInside::FlowRoot
+        )
         && style.clone_position() == Position::Static
         && style.clone_overflow_x() == Overflow::Visible
         && style.clone_overflow_y() == Overflow::Visible
-        && !style.clone_contain().contains(style::values::computed::Contain::PAINT)
+        && !style
+            .clone_contain()
+            .contains(style::values::computed::Contain::PAINT)
 }
 
 /// Whether `node` collects the positioned boxes passed through by the static
@@ -498,7 +505,10 @@ fn collects_positioned(node: &Node) -> bool {
         return false;
     }
     node.display_style().is_some_and(|display| {
-        matches!(display.inside(), DisplayInside::Flow | DisplayInside::FlowRoot)
+        matches!(
+            display.inside(),
+            DisplayInside::Flow | DisplayInside::FlowRoot
+        )
     })
 }
 
@@ -507,8 +517,10 @@ fn is_lifted_positioned_box(node: &Node) -> bool {
     use style::values::specified::box_::DisplayOutside;
 
     node.primary_styles().is_some_and(|style| {
-        matches!(style.clone_position(), Position::Relative | Position::Sticky)
-            && style.clone_display().outside() == DisplayOutside::Block
+        matches!(
+            style.clone_position(),
+            Position::Relative | Position::Sticky
+        ) && style.clone_display().outside() == DisplayOutside::Block
     })
 }
 
@@ -592,7 +604,9 @@ mod positioned_paint_order_tests {
         );
         let sibling = m.create_element(
             qual_name!("div"),
-            vec![style("display:block;width:200px;height:50px;margin-top:-40px")],
+            vec![style(
+                "display:block;width:200px;height:50px;margin-top:-40px",
+            )],
         );
         m.append_children(wrapper, &[relative]);
         m.append_children(body, &[wrapper, sibling]);

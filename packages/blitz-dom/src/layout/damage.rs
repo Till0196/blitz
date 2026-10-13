@@ -82,7 +82,11 @@ impl BaseDocument {
             .is_some_and(|style| style.clone_float() != Float::None);
         let children = std::mem::take(&mut self.nodes[node_id].children);
         let pseudos = [self.nodes[node_id].before(), self.nodes[node_id].after()];
-        for child in children.iter().copied().chain(pseudos.into_iter().flatten()) {
+        for child in children
+            .iter()
+            .copied()
+            .chain(pseudos.into_iter().flatten())
+        {
             damage_from_children |= self.propagate_damage_flags(child);
             subtree_has_floats |= self.nodes[child].subtree_has_floats;
         }
