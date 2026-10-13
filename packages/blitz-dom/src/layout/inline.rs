@@ -1259,3 +1259,145 @@ mod static_position_tests {
         assert!(doc.nodes[after].final_layout().location.y >= 60.0);
     }
 }
+
+#[cfg(test)]
+mod vertical_align_tests {
+    use crate::{Attribute, BaseDocument, DocumentConfig, NodeId, qual_name};
+    use blitz_traits::shell::{ColorScheme, Viewport};
+
+    /// Two inline-blocks of different heights in one line: a 60px one, and a 20px one
+    /// with the given `vertical-align`. Returns (document, the 20px box, the bottom of the
+    /// line box).
+    fn make_doc(vertical_align: &str) -> (BaseDocument, NodeId, f32) {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let root_id = doc.root_node().id;
+        let style = |value: &str| Attribute {
+            name: qual_name!("style"),
+            value: value.to_string(),
+        };
+        let mut mutator = doc.mutate();
+        let html = mutator.create_element(qual_name!("html"), vec![]);
+        let body = mutator.create_element(qual_name!("body"), vec![style("margin:0")]);
+        let container = mutator.create_element(
+            qual_name!("div"),
+            vec![style("display:block;width:300px;line-height:1")],
+        );
+        let tall = mutator.create_element(
+            qual_name!("div"),
+            vec![style("display:inline-block;width:100px;height:60px")],
+        );
+        let short = mutator.create_element(
+            qual_name!("div"),
+            vec![style(&format!(
+                "display:inline-block;width:50px;height:20px;vertical-align:{vertical_align}"
+            ))],
+        );
+        mutator.append_children(container, &[tall, short]);
+        mutator.append_children(body, &[container]);
+        mutator.append_children(html, &[body]);
+        mutator.append_children(root_id, &[html]);
+        drop(mutator);
+        doc.resolve(0.0);
+        let line_bottom = doc.nodes[container].final_layout().size.height;
+        (doc, short, line_bottom)
+    }
+
+    /// `vertical-align: top` puts the box at the top of the line box and `bottom` at its
+    /// bottom (which is below the tall box by the strut's descent); the default sits it on
+    /// the baseline (the bottom of the tall box).
+    #[test]
+    fn inline_blocks_follow_vertical_align_within_the_line() {
+        let (doc, short, _) = make_doc("baseline");
+        assert_eq!(doc.nodes[short].final_layout().location.y, 40.0);
+        let (doc, short, _) = make_doc("top");
+        assert_eq!(doc.nodes[short].final_layout().location.y, 0.0);
+        let (doc, short, line_bottom) = make_doc("bottom");
+        assert!(line_bottom >= 60.0);
+        assert_eq!(doc.nodes[short].final_layout().location.y, line_bottom - 20.0);
+    }
+
+    /// A box taller than the line's strut with `vertical-align: top` sits at the top of
+    /// the line box at any scale factor.
+    #[test]
+    fn top_aligned_box_starts_at_the_top_of_the_line_when_scaled() {
+        for scale in [0.5, 0.67, 1.0, 1.33] {
+            let mut doc = BaseDocument::new(DocumentConfig {
+                viewport: Some(Viewport::new(800, 600, scale, ColorScheme::Light)),
+                ..Default::default()
+            });
+            let root_id = doc.root_node().id;
+            let style = |value: &str| Attribute {
+                name: qual_name!("style"),
+                value: value.to_string(),
+            };
+            let mut mutator = doc.mutate();
+            let html = mutator.create_element(qual_name!("html"), vec![]);
+            let body = mutator.create_element(qual_name!("body"), vec![style("margin:0")]);
+            let container = mutator.create_element(
+                qual_name!("div"),
+                vec![style(
+                    "display:block;width:300px;font-size:20px;line-height:20px",
+                )],
+            );
+            let logo = mutator.create_element(
+                qual_name!("div"),
+                vec![style(
+                    "display:inline-block;width:82px;height:46px;vertical-align:top",
+                )],
+            );
+            mutator.append_children(container, &[logo]);
+            mutator.append_children(body, &[container]);
+            mutator.append_children(html, &[body]);
+            mutator.append_children(root_id, &[html]);
+            drop(mutator);
+            doc.resolve(0.0);
+            assert_eq!(
+                doc.nodes[logo].unrounded_layout().location.y,
+                0.0,
+                "scale {scale}"
+            );
+        }
+    }
+
+    /// A box aligned to the bottom of a line whose `line-height` is smaller
+    /// than its font's ascent and descent sits at the bottom of the line box
+    /// the line occupies (`line-height` tall), not below it.
+    #[test]
+    fn bottom_aligned_box_stays_in_a_line_shorter_than_its_font() {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(800, 600, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let root_id = doc.root_node().id;
+        let style = |value: &str| Attribute {
+            name: qual_name!("style"),
+            value: value.to_string(),
+        };
+        let mut mutator = doc.mutate();
+        let html = mutator.create_element(qual_name!("html"), vec![]);
+        let body = mutator.create_element(qual_name!("body"), vec![style("margin:0")]);
+        let container = mutator.create_element(
+            qual_name!("div"),
+            vec![style(
+                "display:block;width:300px;font-size:24px;line-height:12px",
+            )],
+        );
+        let text = mutator.create_text_node("A");
+        let boxed = mutator.create_element(
+            qual_name!("div"),
+            vec![style(
+                "display:inline-block;width:12px;height:12px;vertical-align:bottom",
+            )],
+        );
+        mutator.append_children(container, &[text, boxed]);
+        mutator.append_children(body, &[container]);
+        mutator.append_children(html, &[body]);
+        mutator.append_children(root_id, &[html]);
+        drop(mutator);
+        doc.resolve(0.0);
+        assert_eq!(doc.nodes[boxed].final_layout().location.y, 0.0);
+    }
+}
