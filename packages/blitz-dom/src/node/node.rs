@@ -119,6 +119,11 @@ pub struct Node {
     /// stacking context on its last (non-skipped) paint-tree build. Replayed
     /// when the subtree is skipped as clean. Empty for stacking-context roots.
     pub sc_contribution_cache: RefCell<ThinVec<HoistedPaintChild>>,
+    /// Whether this box or any box in its subtree is floated. Refreshed by
+    /// damage propagation. A cached layout of such a subtree cannot be reused
+    /// inside a block formatting context, because replaying it would not place
+    /// its floats again.
+    pub subtree_has_floats: bool,
 
     // Flags
     pub flags: NodeFlags,
@@ -416,6 +421,7 @@ impl Node {
             paint_children: RefCell::new(None),
             stacking_context: None,
             sc_contribution_cache: RefCell::new(ThinVec::new()),
+            subtree_has_floats: false,
 
             flags: NodeFlags::empty(),
             data,

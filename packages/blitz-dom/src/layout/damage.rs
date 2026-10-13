@@ -14,6 +14,7 @@ use style::properties::generated::longhands::position::computed_value::T as Posi
 use style::selector_parser::{PseudoElement, RestyleDamage};
 use style::shared_lock::StylesheetGuards;
 use style::url::ComputedUrl;
+use style::values::computed::Float;
 use style::values::generics::image::Image as StyloImage;
 use style::values::specified::align::AlignFlags;
 use style::values::specified::box_::DisplayInside;
@@ -76,16 +77,16 @@ impl BaseDocument {
         }
 
         let mut damage_from_children = RestyleDamage::empty();
+        let mut subtree_has_floats = self.nodes[node_id]
+            .primary_styles()
+            .is_some_and(|style| style.clone_float() != Float::None);
         let children = std::mem::take(&mut self.nodes[node_id].children);
-        for child in children.iter() {
-            damage_from_children |= self.propagate_damage_flags(*child);
+        let pseudos = [self.nodes[node_id].before(), self.nodes[node_id].after()];
+        for child in children.iter().copied().chain(pseudos.into_iter().flatten()) {
+            damage_from_children |= self.propagate_damage_flags(child);
+            subtree_has_floats |= self.nodes[child].subtree_has_floats;
         }
-        if let Some(before_id) = self.nodes[node_id].before() {
-            damage_from_children |= self.propagate_damage_flags(before_id);
-        }
-        if let Some(after_id) = self.nodes[node_id].after() {
-            damage_from_children |= self.propagate_damage_flags(after_id);
-        }
+        self.nodes[node_id].subtree_has_floats = subtree_has_floats;
 
         // A child's `order` changed: this container re-collects (and so re-sorts)
         // its layout children. Only the direct parent consumes the flag, and the
