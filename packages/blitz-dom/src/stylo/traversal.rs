@@ -287,7 +287,15 @@ impl<'dom> DomTraversal<BlitzNode<'dom>> for RecalcStyle<'_> {
         if let Some(el) = node.as_element() {
             // let mut data = el.mutate_data().unwrap();
             let mut data = unsafe { el.ensure_data() };
+            let was_unstyled = data.styles.get_primary().is_none();
             recalc_style_at(self, context, el, &mut data, note_child);
+            // Stylo computes damage against the previous style, so an element styled for the
+            // first time (one inserted inside a `display: none` subtree, or whose styles were
+            // dropped when an ancestor became `display: none`) gets none. Its boxes have never
+            // been built, so construct them.
+            if was_unstyled && data.styles.get_primary().is_some() {
+                data.damage.insert(crate::layout::damage::ALL_DAMAGE);
+            }
 
             sync_pseudo_element_styles(el.0, &data, &self.nodes_needing_style_image_flush);
             if let Some(style) = data.styles.get_primary() {

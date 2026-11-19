@@ -1168,3 +1168,94 @@ mod inline_pseudo_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod display_none_insertion_tests {
+    use crate::{Attribute, BaseDocument, DocumentConfig, NodeId, qual_name};
+    use blitz_traits::shell::{ColorScheme, Viewport};
+
+    fn style(value: &str) -> Attribute {
+        Attribute {
+            name: qual_name!("style"),
+            value: value.to_string(),
+        }
+    }
+
+    /// `<body><div (hidden)><div 200x100></div></div></body>`. Returns the
+    /// document, the hidden element and its child.
+    fn make_doc() -> (BaseDocument, NodeId, NodeId) {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let root_id = doc.root_node().id;
+        let mut m = doc.mutate();
+        let html = m.create_element(qual_name!("html"), vec![style("display:block")]);
+        let body = m.create_element(qual_name!("body"), vec![style("display:block;margin:0")]);
+        let layer = m.create_element(qual_name!("div"), vec![style("display:none")]);
+        let detail = m.create_element(
+            qual_name!("div"),
+            vec![style("display:block;width:200px;height:100px")],
+        );
+        m.append_children(layer, &[detail]);
+        m.append_children(body, &[layer]);
+        m.append_children(html, &[body]);
+        m.append_children(root_id, &[html]);
+        drop(m);
+        doc.resolve(0.0);
+        (doc, layer, detail)
+    }
+
+    /// Append `<div 50px wide><div 20px tall>abc</div></div>` to `parent`.
+    fn append_content(doc: &mut BaseDocument, parent: NodeId) -> (NodeId, NodeId) {
+        let mut m = doc.mutate();
+        let outer = m.create_element(qual_name!("div"), vec![style("display:block;width:50px")]);
+        let inner = m.create_element(qual_name!("div"), vec![style("display:block;height:20px")]);
+        let text = m.create_text_node("abc");
+        m.append_children(inner, &[text]);
+        m.append_children(outer, &[inner]);
+        m.append_children(parent, &[outer]);
+        drop(m);
+        (outer, inner)
+    }
+
+    fn show(doc: &mut BaseDocument, node: NodeId, display: &str) {
+        let mut m = doc.mutate();
+        m.set_style_property(node, "display", display);
+        drop(m);
+        doc.resolve(0.0);
+    }
+
+    fn assert_laid_out(doc: &BaseDocument, outer: NodeId, inner: NodeId) {
+        assert_eq!(doc.nodes[inner].final_layout().size.height, 20.0);
+        assert_eq!(doc.nodes[outer].final_layout().size.height, 20.0);
+    }
+
+    /// Content inserted inside a `display: none` subtree, with a layout pass
+    /// before the subtree is shown, is laid out once it is shown.
+    #[test]
+    fn content_inserted_while_hidden_is_laid_out_when_shown() {
+        let (mut doc, layer, detail) = make_doc();
+        let (outer, inner) = append_content(&mut doc, detail);
+        doc.resolve(0.0);
+        show(&mut doc, layer, "block");
+        assert_laid_out(&doc, outer, inner);
+    }
+
+    /// Content which was laid out, hidden (Stylo drops the styles below a
+    /// `display: none` element) and shown again is laid out again.
+    #[test]
+    fn content_shown_again_after_being_hidden_is_laid_out() {
+        let (mut doc, layer, detail) = make_doc();
+        show(&mut doc, layer, "block");
+        let (outer, inner) = append_content(&mut doc, detail);
+        doc.resolve(0.0);
+        assert_laid_out(&doc, outer, inner);
+        show(&mut doc, layer, "none");
+        let (outer2, inner2) = append_content(&mut doc, detail);
+        doc.resolve(0.0);
+        show(&mut doc, layer, "block");
+        assert_laid_out(&doc, outer, inner);
+        assert_laid_out(&doc, outer2, inner2);
+    }
+}
