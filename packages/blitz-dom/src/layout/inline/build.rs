@@ -197,20 +197,23 @@ pub(crate) fn build_inline_layout_into(
                             if box_kind == InlineBoxKind::InFlow {
                                 text_transformer.word_break(builder);
                             }
-                            builder.push_inline_box(InlineBox {
-                                id: node_id.as_u64(),
-                                kind: box_kind,
-                                // Overridden by push_inline_box method
-                                index: 0,
-                                // Width and height are set during layout
-                                width: 0.0,
-                                height: 0.0,
-                                baseline: None,
-                                vertical_align: node
-                                    .primary_styles()
-                                    .map(|s| stylo_to_parley::vertical_align(&s))
-                                    .unwrap_or_default(),
-                            });
+                            push_inline_box(
+                                builder,
+                                InlineBox {
+                                    id: node_id.as_u64(),
+                                    kind: box_kind,
+                                    // Overridden by push_inline_box method
+                                    index: 0,
+                                    // Width and height are set during layout
+                                    width: 0.0,
+                                    height: 0.0,
+                                    baseline: None,
+                                    vertical_align: node
+                                        .primary_styles()
+                                        .map(|s| stylo_to_parley::vertical_align(&s))
+                                        .unwrap_or_default(),
+                                },
+                            );
                         } else if *tag_name == local_name!("br") {
                             // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
                             // TODO: update span id for br spans
@@ -271,20 +274,23 @@ pub(crate) fn build_inline_layout_into(
                         if box_kind == InlineBoxKind::InFlow {
                             text_transformer.word_break(builder);
                         }
-                        builder.push_inline_box(InlineBox {
-                            id: node_id.as_u64(),
-                            kind: box_kind,
-                            // Overridden by push_inline_box method
-                            index: 0,
-                            // Width and height are set during layout
-                            width: 0.0,
-                            height: 0.0,
-                            baseline: None,
-                            vertical_align: node
-                                .primary_styles()
-                                .map(|s| stylo_to_parley::vertical_align(&s))
-                                .unwrap_or_default(),
-                        });
+                        push_inline_box(
+                            builder,
+                            InlineBox {
+                                id: node_id.as_u64(),
+                                kind: box_kind,
+                                // Overridden by push_inline_box method
+                                index: 0,
+                                // Width and height are set during layout
+                                width: 0.0,
+                                height: 0.0,
+                                baseline: None,
+                                vertical_align: node
+                                    .primary_styles()
+                                    .map(|s| stylo_to_parley::vertical_align(&s))
+                                    .unwrap_or_default(),
+                            },
+                        );
                     }
                 };
             }
@@ -300,6 +306,84 @@ pub(crate) fn build_inline_layout_into(
                 // node.remove_damage(CONSTRUCT_DESCENDENT | CONSTRUCT_FC | CONSTRUCT_BOX);
             }
             NodeData::Document(_) => unreachable!(),
+        }
+    }
+}
+
+/// Push an inline box. An in-flow box is a U+FFFC character in Parley's text, which would
+/// take the `letter-spacing` of the element it is in. Browsers do not space atomic inlines, so
+/// the box is pushed in a span with no letter-spacing.
+fn push_inline_box(builder: &mut TreeBuilder<TextBrush>, inline_box: InlineBox) {
+    if inline_box.kind == InlineBoxKind::InFlow {
+        builder.push_style_modification_span(&[parley::StyleProperty::LetterSpacing(0.0)]);
+        builder.push_inline_box(inline_box);
+        builder.pop_style_span();
+    } else {
+        builder.push_inline_box(inline_box);
+    }
+}
+
+#[cfg(test)]
+mod atomic_inline_letter_spacing_tests {
+    use crate::{Attribute, BaseDocument, DocumentConfig, NodeId, qual_name};
+    use blitz_traits::shell::{ColorScheme, Viewport};
+
+    /// An inline-block with `letter-spacing` holding three 20px inline-blocks.
+    /// Returns the container and the three boxes.
+    fn make_doc(letter_spacing: &str) -> (BaseDocument, NodeId, Vec<NodeId>) {
+        let mut doc = BaseDocument::new(DocumentConfig {
+            viewport: Some(Viewport::new(400, 300, 1.0, ColorScheme::Light)),
+            ..Default::default()
+        });
+        let root_id = doc.root_node().id;
+        let style = |value: &str| Attribute {
+            name: qual_name!("style"),
+            value: value.to_string(),
+        };
+        let mut mutator = doc.mutate();
+        let html = mutator.create_element(qual_name!("html"), vec![style("display:block")]);
+        let body =
+            mutator.create_element(qual_name!("body"), vec![style("display:block;margin:0")]);
+        let container = mutator.create_element(
+            qual_name!("div"),
+            vec![style(&format!(
+                "display:inline-block;font-size:16px;letter-spacing:{letter_spacing}"
+            ))],
+        );
+        let boxes: Vec<NodeId> = (0..3)
+            .map(|_| {
+                mutator.create_element(
+                    qual_name!("span"),
+                    vec![style("display:inline-block;width:20px;height:10px")],
+                )
+            })
+            .collect();
+        mutator.append_children(container, &boxes);
+        mutator.append_children(body, &[container]);
+        mutator.append_children(html, &[body]);
+        mutator.append_children(root_id, &[html]);
+        drop(mutator);
+        doc.resolve(0.0);
+        (doc, container, boxes)
+    }
+
+    /// The `letter-spacing` of the element an atomic inline is in does not move the boxes
+    /// after it, as in browsers: they sit side by side on one line, and the shrink-to-fit
+    /// width of their container is their total width.
+    #[test]
+    fn letter_spacing_does_not_space_atomic_inlines() {
+        for letter_spacing in ["0", "-40px", "10px"] {
+            let (doc, container, boxes) = make_doc(letter_spacing);
+            let xs: Vec<f32> = boxes
+                .iter()
+                .map(|&id| doc.nodes[id].final_layout().location.x)
+                .collect();
+            assert_eq!(xs, [0.0, 20.0, 40.0], "letter-spacing: {letter_spacing}");
+            assert_eq!(
+                doc.nodes[container].final_layout().size.width,
+                60.0,
+                "letter-spacing: {letter_spacing}"
+            );
         }
     }
 }
