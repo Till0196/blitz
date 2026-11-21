@@ -16,12 +16,14 @@ use crate::{FONT_EMBOLDEN_ENABLED, SELECTION_COLOR};
 /// Draw the backgrounds of inline elements (e.g. `<span style="background: ...">`).
 ///
 /// Each glyph run carries the node id of the innermost inline element it belongs to
-/// (via its brush). We look up that node's `background-color` and, if non-transparent,
-/// fill a rectangle covering the run's advance and its font's ascent/descent so that the
-/// background sits behind the text.
+/// (via its brush). An inline element's background lies behind all of its content,
+/// including the parts inside nested inline elements (CSS 2.1 Appendix E), so for each
+/// run we walk the layout parents up to the inline root and fill the `background-color` of every
+/// non-transparent element on the way, outermost first, over a rectangle covering the
+/// run's advance and its font's ascent/descent.
 ///
 /// The inline root's own background is painted separately (as a normal block box), so
-/// runs belonging to the root are skipped to avoid drawing it twice.
+/// it is not drawn again here.
 pub(crate) fn draw_inline_backgrounds<'a>(
     scene: &mut impl PaintScene,
     lines: impl Iterator<Item = Line<'a, TextBrush>>,
@@ -29,33 +31,43 @@ pub(crate) fn draw_inline_backgrounds<'a>(
     transform: Affine,
     inline_root_id: NodeId,
 ) {
+    let mut fills: Vec<Color> = Vec::new();
     for line in lines {
         for item in line.items() {
             let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
                 continue;
             };
 
-            let node_id = glyph_run.style().brush.id;
-            if node_id == inline_root_id {
-                continue;
+            fills.clear();
+            let mut walk_id = Some(glyph_run.style().brush.id);
+            while let Some(node_id) = walk_id.filter(|id| *id != inline_root_id) {
+                let node = doc.get_node(node_id);
+                walk_id = node.and_then(|node| node.layout_parent.get());
+                let Some(styles) = node.and_then(|node| node.primary_styles()) else {
+                    continue;
+                };
+                // Only inline boxes paint here; a block-level box paints its own background.
+                if styles.clone_display().outside()
+                    != style::values::specified::box_::DisplayOutside::Inline
+                {
+                    break;
+                }
+                if styles.get_inherited_box().visibility
+                    != style::computed_values::visibility::T::Visible
+                {
+                    continue;
+                }
+                let current_color = styles.clone_color();
+                let bg_color = styles
+                    .get_background()
+                    .background_color
+                    .resolve_to_absolute(&current_color)
+                    .as_srgb_color();
+                if bg_color != Color::TRANSPARENT {
+                    fills.push(bg_color);
+                }
             }
-
-            let Some(styles) = doc.get_node(node_id).and_then(|node| node.primary_styles()) else {
-                continue;
-            };
-            if styles.get_inherited_box().visibility
-                != style::computed_values::visibility::T::Visible
-            {
-                continue;
-            }
-
-            let current_color = styles.clone_color();
-            let bg_color = styles
-                .get_background()
-                .background_color
-                .resolve_to_absolute(&current_color)
-                .as_srgb_color();
-            if bg_color == Color::TRANSPARENT {
+            if fills.is_empty() {
                 continue;
             }
 
@@ -67,14 +79,16 @@ pub(crate) fn draw_inline_backgrounds<'a>(
             let y1 = baseline + metrics.descent as f64;
             let rect = Rect::new(x, y0, x + w, y1);
 
-            scene.fill(
-                Fill::NonZero,
-                transform,
-                bg_color,
-                None,
-                &rect,
-                AntiAliasing::Enabled,
-            );
+            for &bg_color in fills.iter().rev() {
+                scene.fill(
+                    Fill::NonZero,
+                    transform,
+                    bg_color,
+                    None,
+                    &rect,
+                    AntiAliasing::Enabled,
+                );
+            }
         }
     }
 }
